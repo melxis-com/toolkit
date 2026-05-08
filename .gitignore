@@ -1,0 +1,10 @@
+.claude/
+.DS_Store
+node_modules/
+
+# Editor temp / swap files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

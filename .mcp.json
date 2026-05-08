@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "melxis": {
+      "type": "http",
+      "url": "https://mcp.melxis.com"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "melxis-com-toolkit",
+  "owner": {
+    "name": "Melxis",
+    "email": "support@melxis.com"
+  },
+  "metadata": {
+    "description": "Coupled memory and tasks for AI agents — Mels guide Tasks, completed Tasks feed Mels back",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "melxis",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/melxis-com/toolkit.git"
+      },
+      "category": "productivity"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+name: Release
+
+# Publish a GitHub Release for a signed tag, attributed to the
+# "Melxis Release" GitHub App so the release page does not leak
+# personal identity.
+#
+# Triggers:
+#   - push of any v*.*.* tag (auto on tag push)
+#   - workflow_dispatch (manual, with tag input — used for back-publishing)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.1.0). Must already exist as a signed tag on this repo.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            value="${{ inputs.tag }}"
+          else
+            value="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout at tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.tag.outputs.value }}
+          fetch-depth: 0
+
+      - name: Generate App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.MELXIS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MELXIS_RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh release create "${{ steps.tag.outputs.value }}" \
+            --repo melxis-com/toolkit \
+            --title "${{ steps.tag.outputs.value }}" \
+            --verify-tag \
+            --generate-notes

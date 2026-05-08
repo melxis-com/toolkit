@@ -1,0 +1,15 @@
+{
+  "name": "melxis",
+  "version": "0.1.0",
+  "description": "One mind. Many AIs. — shared memory and tasks for AI agents",
+  "author": {
+    "name": "Melxis",
+    "url": "https://melxis.com"
+  },
+  "homepage": "https://melxis.com",
+  "repository": "https://github.com/melxis-com/toolkit",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "tasks", "mcp", "ai-agents", "shared-memory", "cross-session"],
+  "skills": ["./skills"],
+  "mcpServers": "./.mcp.json"
+}
