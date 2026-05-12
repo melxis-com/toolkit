@@ -27,8 +27,9 @@ import {
   parseTranscript,
   extractText,
   extractOperationCheckpoints,
-  hasToolCallMatching,
   hasToolCallMatchingAfterIndex,
+  findLastCaptureAnchorIndex,
+  findLastClosureAnchorIndex,
   PATTERNS,
   captureMatches,
   emitText,
@@ -38,7 +39,7 @@ import {
 function emitCaptureReminder(samples) {
   const quoted = samples.length ? samples.join('\n') + '\n' : '';
   emitText(
-    `This turn surfaced a decision or insight not yet persisted to Melxis. Quoted signals:
+    `This turn surfaced a decision, insight, preference, or correction not yet persisted to Melxis. Quoted signals:
 ${quoted}
 Apply Memory Operating Rules:
 - **In-moment capture** (Rule 2) — propose save in this turn; do not defer. Apply Recurrence likelihood + Inferability criteria.
@@ -102,14 +103,6 @@ try {
   const insight = captureMatches(text, PATTERNS.insight, 2);
   const closure = captureMatches(text, PATTERNS.closure, 3);
 
-  // PATTERNS.save is non-global; we only need presence/absence (the count is
-  // never used for ranking, only as a "did the agent already save?" gate).
-  const hasSave =
-    PATTERNS.save.test(text) ||
-    hasToolCallMatching(
-      entries,
-      /(?:^|[._-])(mel_create|task_create|mel_update|mel_patch|task_update|mel_link_create)(?:[._-]|$)/,
-    );
   const hasSaveAfterLastOperationCheckpoint =
     lastOperationCheckpointIndex >= 0 &&
     hasToolCallMatchingAfterIndex(
@@ -117,11 +110,33 @@ try {
       /(?:^|[._-])(mel_create|task_create|mel_update|mel_patch|task_update|mel_link_create)(?:[._-]|$)/,
       lastOperationCheckpointIndex,
     );
-  const hasMemoryFeedback =
-    /(mel_create|mel_update|mel_patch|mel_link_create)/.test(text) ||
-    hasToolCallMatching(
+  // Capture gating: only count saves that happen AFTER the most recent
+  // capture anchor (latest decision / insight / preference / feedback signal
+  // in user-or-assistant text). A global "any save in tail" check suppressed
+  // the reminder whenever an earlier-in-session save existed, causing later
+  // fresh signals to be missed.
+  const lastCaptureAnchorIndex = findLastCaptureAnchorIndex(entries);
+  const hasSaveAfterCaptureAnchor =
+    lastCaptureAnchorIndex >= 0 &&
+    hasToolCallMatchingAfterIndex(
+      entries,
+      /(?:^|[._-])(mel_create|task_create|mel_update|mel_patch|task_update|mel_link_create)(?:[._-]|$)/,
+      lastCaptureAnchorIndex,
+    );
+  // Closure feedback gating: only count mel writes that happen AFTER the most
+  // recent closure anchor (closure text signal or task_update→completed/cancelled).
+  // Symmetric to capture gating above. The earlier global hasMemoryFeedback
+  // check suppressed the reminder whenever any mel write existed anywhere in
+  // the tail — including writes that predated the closure event — so
+  // review-driven additions after a saved bug-fix mel never triggered closure
+  // evaluation.
+  const lastClosureAnchorIndex = findLastClosureAnchorIndex(entries);
+  const hasMemoryFeedbackAfterClosure =
+    lastClosureAnchorIndex >= 0 &&
+    hasToolCallMatchingAfterIndex(
       entries,
       /(?:^|[._-])(mel_create|mel_update|mel_patch|mel_link_create)(?:[._-]|$)/,
+      lastClosureAnchorIndex,
     );
   const taskCompleted = PATTERNS.taskCompleted.test(text);
 
@@ -131,16 +146,19 @@ try {
   // the same line twice.
   const captureSamples = [...new Set([...decision.samples, ...insight.samples])].slice(0, 3);
 
-  // Capture reminder: signal-gated, no throttle. Emit if any decision/insight
-  // signal exists in the recent window AND no save call was observed.
-  if (captureSignals >= 1 && !hasSave) {
+  // Capture reminder: signal-gated, no throttle. Emit if any decision /
+  // insight / preference / feedback signal exists in the recent window AND
+  // no save call was observed AFTER that signal.
+  if (captureSignals >= 1 && !hasSaveAfterCaptureAnchor) {
     emitCaptureReminder(captureSamples);
   }
 
   // Closure feedback reminder: signal-gated, independent of capture.
   // A task_update(completed/cancelled) closes the task but does not by itself
   // prove that conversation/task/artifact feedback was evaluated into memory.
-  if ((closure.count >= 1 || taskCompleted) && !hasMemoryFeedback) {
+  // Gating uses hasMemoryFeedbackAfterClosure so that earlier in-session mel
+  // writes do not suppress the reminder at closure time.
+  if ((closure.count >= 1 || taskCompleted) && !hasMemoryFeedbackAfterClosure) {
     emitClosureReminder(closure.samples);
   }
 

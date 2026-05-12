@@ -118,7 +118,7 @@ When retrieving multiple mels, look for patterns or contradictions across them. 
 
 Configured via the `MELXIS_WRITE_POLICY` env var (read by the toolkit's SessionStart hook). The active policy block is injected into context at session start; consult it for the authoritative behavior.
 
-- **`auto` (default)** — Save directly when judgement criteria (Recurrence × Inferability) are met. No per-write confirmation. Editorial control is at recall time (supersession + decay).
+- **`auto` (default)** — Save directly when judgement criteria (Recurrence × Inferability) are met. No per-write confirmation. Editorial control is at recall time (supersession via `mel_link_create` reason="supersedes").
 - **`smart`** — Save directly when the signal is clear; if either Recurrence or Inferability is ambiguous, state the candidate and ask once.
 - **`confirm`** — Always state target and intent and wait for explicit "yes" before any write (incl. deletion). Use in regulated environments or when the user is dogfooding write hygiene.
 
@@ -245,7 +245,7 @@ Instead:
 
 1. Create a new `project-orientation` mel reflecting the current state.
 2. Link the new mel to the previous one with `mel_link_create(source_id: <new>, target_id: <old>, reason: "supersedes prior orientation: <reason for change>")`.
-3. The old orientation remains as a historical record. Future sessions surface the most recent (highest utility) orientation, while the link chain preserves the evolution.
+3. The old orientation remains as a historical record. Future sessions surface the most recent orientation first, while the link chain preserves the evolution.
 
 This applies to any mel that captures policy or scope, not just orientation.
 

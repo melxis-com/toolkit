@@ -160,6 +160,89 @@ export function hasToolCallMatchingAfterIndex(entries, pattern, index) {
   return hasToolCallMatching(entries.slice(start), pattern);
 }
 
+// Check whether a single transcript entry's message text matches a pattern.
+// Mirrors extractText's content-walking but scoped to one entry so we can
+// pinpoint the position of the latest matching signal.
+function entryTextMatchesPattern(entry, pattern) {
+  const msg = entry?.message;
+  if (!msg) return false;
+  const content = msg.content;
+  if (typeof content === 'string') return pattern.test(content);
+  if (Array.isArray(content)) {
+    for (const c of content) {
+      if (typeof c === 'string' && pattern.test(c)) return true;
+      if (c && typeof c === 'object' && typeof c.text === 'string' && pattern.test(c.text)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Detect a task_update tool call inside an entry whose input sets status to
+// completed or cancelled. Mirrors hasToolCallMatching's walk but additionally
+// inspects the tool input to confirm the lifecycle transition.
+function entryHasTaskClosureToolUse(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const stack = [entry];
+  while (stack.length) {
+    const current = parseMaybeJson(stack.pop());
+    if (!current || typeof current !== 'object') continue;
+
+    if (Array.isArray(current)) {
+      stack.push(...current);
+      continue;
+    }
+
+    const name = current.name ?? current.tool_name ?? current.recipient_name ?? current.function?.name;
+    if (typeof name === 'string' && /(?:^|[._-])task_update(?:[._-]|$)/.test(name)) {
+      const input = parseMaybeJson(
+        current.input ?? current.arguments ?? current.parameters ?? current.function?.arguments,
+      );
+      const status = input && typeof input === 'object' ? input.status : undefined;
+      if (status === 'completed' || status === 'cancelled') return true;
+    }
+
+    for (const child of Object.values(current)) {
+      if (child && typeof child === 'object') stack.push(child);
+      else if (typeof child === 'string' && child.trim().startsWith('{')) stack.push(child);
+    }
+  }
+  return false;
+}
+
+// Locate the most recent transcript entry that anchors a task-closure event —
+// either a closure text signal ("shipped" / "完了" / etc.) or a task_update
+// tool call transitioning to completed/cancelled. Returns -1 if neither is
+// present. Used to scope "did the agent persist closure feedback?" to writes
+// that happened AFTER the closure event, not anywhere in the transcript tail.
+export function findLastClosureAnchorIndex(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entryTextMatchesPattern(entry, PATTERNS.closure)) return i;
+    if (entryHasTaskClosureToolUse(entry)) return i;
+  }
+  return -1;
+}
+
+// Locate the most recent transcript entry that anchors a capture event —
+// any decision, insight, preference, or feedback signal in user/assistant text.
+// Symmetric to findLastClosureAnchorIndex: used to scope "did the agent save
+// after the latest capture signal?" so that an earlier-in-session save does
+// not suppress the reminder when a fresh signal arrives.
+export function findLastCaptureAnchorIndex(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (
+      entryTextMatchesPattern(entry, PATTERNS.decision) ||
+      entryTextMatchesPattern(entry, PATTERNS.insight)
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 const GIT_CHECKPOINT_PATTERN = new RegExp(
   [
     '(^|[;&|]\\s*)',
@@ -190,12 +273,88 @@ export function extractOperationCheckpoints(entries) {
   return checkpoints;
 }
 
+// Detect whether the recent transcript shows an active Melxis task. An
+// "active" task is one that has been created (via task_create) or transitioned
+// to in_progress (via task_update) without a subsequent closure transition
+// (completed / cancelled) on the same task id. The latter scoping is
+// approximate: we walk entries in order, set "active" on create/in_progress,
+// and clear "active" on completed/cancelled regardless of id, because the
+// UserPromptSubmit caller only needs a yes/no signal that some task anchor
+// is in play before injecting the task_create directive. False positives
+// (an active task suppresses the directive) are preferable to false
+// negatives (re-injecting the directive over an already-anchored loop).
+export function hasActiveMelxisTask(entries) {
+  if (!Array.isArray(entries)) return false;
+  let active = false;
+  const stack = [...entries];
+  // Walk entries in order via a queue; we want chronological transitions so
+  // that a later completed/cancelled clears an earlier in_progress.
+  for (const entry of entries) {
+    const found = findTaskTransitions(entry);
+    for (const t of found) {
+      if (t === 'open') active = true;
+      else if (t === 'close') active = false;
+    }
+  }
+  return active;
+}
+
+// Return a list of 'open' | 'close' transitions discovered inside a single
+// transcript entry. 'open' covers task_create and task_update(status=in_progress).
+// 'close' covers task_update with status completed/cancelled. Order within
+// an entry is best-effort (object key iteration order) but multi-transition
+// single entries are rare in practice.
+function findTaskTransitions(entry) {
+  const out = [];
+  if (!entry || typeof entry !== 'object') return out;
+  const stack = [entry];
+  while (stack.length) {
+    const current = parseMaybeJson(stack.pop());
+    if (!current || typeof current !== 'object') continue;
+    if (Array.isArray(current)) {
+      stack.push(...current);
+      continue;
+    }
+    const name = current.name ?? current.tool_name ?? current.recipient_name ?? current.function?.name;
+    if (typeof name === 'string') {
+      const isCreate = /(?:^|[._-])task_create(?:[._-]|$)/.test(name);
+      const isUpdate = /(?:^|[._-])task_update(?:[._-]|$)/.test(name);
+      if (isCreate || isUpdate) {
+        const input = parseMaybeJson(
+          current.input ?? current.arguments ?? current.parameters ?? current.function?.arguments,
+        );
+        const status = input && typeof input === 'object' ? input.status : undefined;
+        if (isCreate) {
+          // task_create may omit status (defaults to in_progress per Melxis convention)
+          if (status === undefined || status === 'in_progress') out.push('open');
+          else if (status === 'completed' || status === 'cancelled') out.push('close');
+        } else if (isUpdate) {
+          if (status === 'in_progress') out.push('open');
+          else if (status === 'completed' || status === 'cancelled') out.push('close');
+        }
+      }
+    }
+    for (const child of Object.values(current)) {
+      if (child && typeof child === 'object') stack.push(child);
+      else if (typeof child === 'string' && child.trim().startsWith('{')) stack.push(child);
+    }
+  }
+  return out;
+}
+
 // Multilingual signal patterns. Aligns with the v0.8 bash impl so behavior
 // stays comparable across the migration. All patterns are non-global so
 // `pattern.test(line)` inside a loop never carries lastIndex state.
 export const PATTERNS = {
-  decision: /(decided to|chose to|will use|migrating to|switching to|採用した|決めた|決定した|確定|変更した|let's go with|we'll use|settled on)/i,
-  insight: /(root cause|caused by|was caused|原因は|原因が判明|the bug was|refactor(ed|ing)|リファクタ)/i,
+  // decision pattern covers positive intent signals: decisions, confirmations,
+  // and forward-looking preferences ("I prefer X", "今後は", "yes exactly").
+  // These are easy to miss at the agent layer and worth capturing as mels.
+  decision:
+    /(decided to|chose to|will use|migrating to|switching to|採用した|決めた|決定した|確定|変更した|let's go with|we'll use|settled on|yes exactly|perfect|今後は|I prefer|please always)/i,
+  // insight pattern covers root-cause analysis and corrective feedback
+  // ("stop doing X", "no not that", "やめて") — both reshape future behavior.
+  insight:
+    /(root cause|caused by|was caused|原因は|原因が判明|the bug was|refactor(ed|ing)|リファクタ|stop doing|no not that|やめて)/i,
   closure: /(shipped|pushed|landed|merged|done with|完了|できた|終わった|finished|ship it)/i,
   save: /(mel_create|task_create|mel_update|mel_patch|task_update|mel_link_create)/,
   taskCompleted: /task_update[^"]*"status"[^"]*"(completed|cancelled)"/,
