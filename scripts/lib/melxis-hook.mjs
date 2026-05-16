@@ -160,6 +160,15 @@ export function hasToolCallMatchingAfterIndex(entries, pattern, index) {
   return hasToolCallMatching(entries.slice(start), pattern);
 }
 
+export function hasTaskRelatedMelUpdateAfterIndex(entries, index) {
+  if (!Array.isArray(entries)) return false;
+  const start = Math.max(0, index + 1);
+  for (let i = start; i < entries.length; i++) {
+    if (entryHasTaskRelatedMelUpdate(entries[i])) return true;
+  }
+  return false;
+}
+
 // Check whether a single transcript entry's message text matches a pattern.
 // Mirrors extractText's content-walking but scoped to one entry so we can
 // pinpoint the position of the latest matching signal.
@@ -201,6 +210,36 @@ function entryHasTaskClosureToolUse(entry) {
       );
       const status = input && typeof input === 'object' ? input.status : undefined;
       if (status === 'completed' || status === 'cancelled') return true;
+    }
+
+    for (const child of Object.values(current)) {
+      if (child && typeof child === 'object') stack.push(child);
+      else if (typeof child === 'string' && child.trim().startsWith('{')) stack.push(child);
+    }
+  }
+  return false;
+}
+
+function entryHasTaskRelatedMelUpdate(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const stack = [entry];
+  while (stack.length) {
+    const current = parseMaybeJson(stack.pop());
+    if (!current || typeof current !== 'object') continue;
+
+    if (Array.isArray(current)) {
+      stack.push(...current);
+      continue;
+    }
+
+    const name = current.name ?? current.tool_name ?? current.recipient_name ?? current.function?.name;
+    if (typeof name === 'string' && /(?:^|[._-])task_update(?:[._-]|$)/.test(name)) {
+      const input = parseMaybeJson(
+        current.input ?? current.arguments ?? current.parameters ?? current.function?.arguments,
+      );
+      if (input && typeof input === 'object' && Array.isArray(input.related_mel_ids)) {
+        return true;
+      }
     }
 
     for (const child of Object.values(current)) {

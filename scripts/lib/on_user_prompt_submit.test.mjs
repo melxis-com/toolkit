@@ -1,14 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
 import { hasActiveMelxisTask } from './melxis-hook.mjs';
 import {
+  buildAdditionalContext,
   collectMatches,
+  hasMelxisContext,
+  shouldInjectBootstrap,
   shouldInjectDirective,
 } from '../on_user_prompt_submit.mjs';
 
 function toolUseEntry(name, input) {
   return { message: { role: 'assistant', content: [{ type: 'tool_use', name, input }] } };
+}
+
+function textEntry(role, text) {
+  return { message: { role, content: text } };
 }
 
 // --- hasActiveMelxisTask --------------------------------------------------
@@ -125,13 +133,105 @@ test('shouldInjectDirective: silent on no-keyword prompt', () => {
   assert.equal(result.reason, 'no-keyword');
 });
 
-test('shouldInjectDirective: directive output template includes task_create', () => {
+test('shouldInjectDirective: directive output template includes task anchoring', () => {
   // smoke check on the constants used by the main flow — they should mention
-  // task_create so the agent knows what to do.
+  // task_update / task_create so the agent knows how to anchor the work.
   const result = shouldInjectDirective({
     prompt: 'リファクタしてほしい大規模な作業があります',
     entries: [],
   });
   assert.equal(result.inject, true);
   assert.ok(Array.isArray(result.matched));
+});
+
+// --- context recovery -----------------------------------------------------
+
+test('hasMelxisContext: false on empty transcript', () => {
+  assert.equal(hasMelxisContext([]), false);
+});
+
+test('hasMelxisContext: true after Melxis tool call', () => {
+  const entries = [toolUseEntry('mcp__melxis__.mel_search', { query: 'melxis' })];
+  assert.equal(hasMelxisContext(entries), true);
+});
+
+test('hasMelxisContext: true after visible plugin context text', () => {
+  const entries = [textEntry('assistant', 'melxis hive context loaded')];
+  assert.equal(hasMelxisContext(entries), true);
+});
+
+test('shouldInjectBootstrap: injects for normal prompt without Melxis context', () => {
+  const result = shouldInjectBootstrap({ prompt: '今日は良い天気ですか？', entries: [] });
+  assert.equal(result.inject, true);
+});
+
+test('shouldInjectBootstrap: silent for slash commands', () => {
+  const result = shouldInjectBootstrap({ prompt: '/clear', entries: [] });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'command-or-empty');
+});
+
+test('shouldInjectBootstrap: silent when Melxis context is already present', () => {
+  const result = shouldInjectBootstrap({
+    prompt: '今日は良い天気ですか？',
+    entries: [toolUseEntry('mcp__melxis__.task_search', { status: 'in_progress' })],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'context-present');
+});
+
+test('buildAdditionalContext: bootstrap only for non-work prompt', () => {
+  const context = buildAdditionalContext({ prompt: '今日は良い天気ですか？', entries: [] });
+  assert.match(context, /Recent transcript context does not show Melxis bootstrap/);
+  assert.doesNotMatch(context, /task_create/);
+});
+
+test('buildAdditionalContext: combines bootstrap and task directive for multi-step prompt', () => {
+  const context = buildAdditionalContext({
+    prompt: 'この WebSocket バグを調査して修正してほしい',
+    entries: [],
+  });
+  assert.match(context, /Recent transcript context does not show Melxis bootstrap/);
+  assert.match(context, /task_update/);
+  assert.match(context, /task_create/);
+});
+
+// --- executable output contract ------------------------------------------
+
+test('main hook emits UserPromptSubmit additionalContext JSON', () => {
+  const child = spawnSync(process.execPath, ['scripts/on_user_prompt_submit.mjs'], {
+    cwd: new URL('../..', import.meta.url),
+    input: JSON.stringify({
+      prompt: 'この WebSocket バグを調査して修正してほしい',
+      transcript_path: '',
+    }),
+    encoding: 'utf8',
+  });
+
+  assert.equal(child.status, 0);
+  assert.equal(child.stderr, '');
+
+  const output = JSON.parse(child.stdout);
+  assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.match(output.hookSpecificOutput.additionalContext, /Melxis bootstrap/);
+  assert.match(output.hookSpecificOutput.additionalContext, /task_create/);
+});
+
+test('main hook emits bootstrap JSON for cleared-context prompt', () => {
+  const child = spawnSync(process.execPath, ['scripts/on_user_prompt_submit.mjs'], {
+    cwd: new URL('../..', import.meta.url),
+    input: JSON.stringify({
+      prompt: '今日は良い天気ですか？',
+      transcript_path: '',
+    }),
+    encoding: 'utf8',
+  });
+
+  assert.equal(child.status, 0);
+  assert.equal(child.stderr, '');
+
+  const output = JSON.parse(child.stdout);
+  assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.match(output.hookSpecificOutput.additionalContext, /Melxis bootstrap/);
+  assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /task_create/);
 });

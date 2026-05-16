@@ -28,16 +28,18 @@ Capture at semantic moments. Consolidate when semantic events fire (refinement, 
    - Propose \`task_update\` to \`completed\` if not already set.
    - Evaluate the conversation log, task trace, tool activity, and related mels.
    - **Existing memory refinement** — prefer \`mel_patch\` / \`mel_update\` when feedback corrects, narrows, or sharpens an existing mel.
-   - **Insight extraction (WHY)** — if the feedback is genuinely new and durable (a design decision, root cause, or anti-pattern), use \`mel_create\` (tag e.g. \`design-decision\`, \`bug-fix\`, \`anti-pattern\`) and link with reason \`extracted-from-task\`.
-   - **Procedure extraction (HOW)** — if the feedback is a reusable procedural pattern (a recipe / convention worth applying to similar future tasks), use \`mel_create\` (tag \`convention\`) and link with reason \`extracted-from-task\`.
+   - **Insight extraction (WHY)** — search existing mels first. If the feedback is genuinely new and durable (a design decision, root cause, or anti-pattern), use \`mel_create\` (tag e.g. \`design-decision\`, \`bug-fix\`, \`anti-pattern\`) and link with reason \`extracted-from-task\`.
+   - **Procedure extraction (HOW)** — search existing convention/procedure mels first. If the feedback is a genuinely new reusable procedural pattern (a recipe / convention worth applying to similar future tasks), use \`mel_create\` (tag \`convention\`) and link with reason \`extracted-from-task\`.
    - **Granularity audit** — if the completed/cancelled task turned out to contain multiple independently resumable intentions, different owners/surfaces, or separate completion criteria, capture the split pattern as a reusable procedure or anti-pattern.
 8. **Bidirectional link** — Whenever \`task_create\` or \`task_update\` adds \`related_mel_ids\`, also propose \`mel_link_create\` between those mels (reason: \`part-of\`) so design context is dense in the mel graph, not only in the task. Symmetrically, when closure feedback updates or creates relevant memory, propose adding the relevant mel ID to the active task's \`related_mel_ids\` (read-modify-write — \`task_get\` returns resolved \`related_mels\`, so map back to ids via \`related_mels.map(m => m.id)\` before passing to \`task_update\`; arrays are replaced, not appended).
 
 **Quality rules**
 9. **Core insight** — A mel represents understanding, not events. Extract WHY, not WHAT. Lead with the insight; evidence is supporting context.
 10. **Atomicity** — 1 mel = 1 concept. If the target is composite, split into multiple mels and link them.
-11. **Vocabulary discipline**
-    - Tags: \`design-decision\` / \`bug-fix\` / \`convention\` / \`anti-pattern\` / \`user-preference\` / \`project-orientation\` (extend only when none fit)
+11. **Evidence status** — User-reported observations are valuable but not automatically verified facts. If a mel or task description relies only on user report (dogfood results, trigger rates, client behavior, competitor behavior), state that in the summary/content/description and tag it \`user-reported\` + \`needs-verification\` where tags are available. Avoid saving causal hypotheses unless they are necessary to define a verification task; keep them clearly separated from facts and next actions. Promote claims later by \`mel_patch\` / \`mel_update\` or \`task_update\` after logs, transcripts, code, docs, or other evidence confirm them. User preferences and explicit decisions can be saved directly, but split out any external factual claims that need verification.
+12. **Brevity and stale-trace pruning** — Do not turn mels or tasks into conversation logs. Keep mels short and atomic: core insight first, only the minimum evidence needed to trust it. Keep parent task descriptions as compressed current state, not append-only history. Put independently resumable next actions into sub-tasks; remove or replace stale steps, old observations, and resolved blockers via \`task_update\`.
+13. **Vocabulary discipline**
+    - Tags: \`design-decision\` / \`bug-fix\` / \`convention\` / \`anti-pattern\` / \`user-preference\` / \`project-orientation\` / \`user-reported\` / \`needs-verification\` (extend only when none fit)
     - Link reasons: \`supersedes\` / \`refines\` / \`contradicts\` / \`part-of\` / \`uses\` / \`extracted-from-task\` (one per link)
 
 Reads are encouraged proactively. Write behavior follows the active **Write policy** block below — do not assume an "ask first" default.
@@ -103,11 +105,12 @@ Call any write tool (incl. deletion) directly when intent is clear and judgement
 
 const STARTUP_BLOCK = `## Melxis Session Bootstrap
 
-Melxis growing-memory is connected via MCP. Restore cross-session context before responding to the first message:
+Melxis growing-memory is connected via MCP. Restore cross-session context before responding to the first message and form a compact **session brief** in your working context.
 
 1. Call \`mel_search\` with project-context keywords (cwd basename, repo name) and \`tags=["project-orientation"]\`, \`limit=5\`. Omit \`hive_ids\` — that searches across every hive accessible to you in a single call.
-2. If a project-orientation mel surfaces, use its hive as the project hive: call \`task_search\` with \`status="in_progress"\`, \`parent_task_id="root"\`, and that hive_id. Follow the orientation mel's scope and tagging conventions for the rest of the session. **If \`task_search\` returns zero \`in_progress\` tasks AND the user's first request implies non-trivial multi-step work (bug investigation, refactor, feature implementation, review-driven polish loop), propose \`task_create\` BEFORE substantive implementation — the task is the anchor for Rules 6 / 7 / 8 (start / closure / bidirectional). Skip for trivial one-shot edits (typo, single-line fix, pure exploration). **Miscalibration signal**: if you skip task_create and the work then spans 3+ tool calls, or crosses turn boundaries, or surfaces a root cause / decision that would qualify as a save trigger, you skipped wrongly — create the task retroactively. Skip is valid only for trivial one-shot edits (typo, single-line fix, pure read-only exploration).**
-3. If no orientation surfaces, fall back to \`hive_search\` to see what's available. Ask the user once which hive to use (or whether to create one). On confirmation, propose a project-orientation mel as the first entry so this question never recurs.
+2. If a project-orientation mel surfaces, use its hive as the project hive: call \`task_search\` for active/relevant root tasks in that hive. Follow the orientation mel's scope and tagging conventions for the rest of the session. **If the user's first request implies non-trivial multi-step work (bug investigation, refactor, feature implementation, review-driven polish loop), anchor the work BEFORE substantive implementation: use \`task_update(status="in_progress")\` for an existing matching task, otherwise propose \`task_create\`. The task is the anchor for Rules 6 / 7 / 8 (start / closure / bidirectional). Skip for trivial one-shot edits (typo, single-line fix, pure exploration). **Miscalibration signal**: if you skip task anchoring and the work then spans 3+ tool calls, or crosses turn boundaries, or surfaces a root cause / decision that would qualify as a save trigger, you skipped wrongly — update an existing matching task or create one retroactively. Skip is valid only for trivial one-shot edits (typo, single-line fix, pure read-only exploration).**
+3. Build the session brief from the loaded context: project-orientation, active/relevant root tasks, task-related or high-link mels, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks).
+4. If no orientation surfaces, fall back to \`hive_search\` to see what's available. Ask the user once which hive to use (or whether to create one). On confirmation, propose a project-orientation mel as the first entry so this question never recurs.
 
 IMPORTANT: This bootstrap is a hard precondition — execute step 1 (\`mel_search\` with \`tags=["project-orientation"]\`) before any other tool call or assistant text. The judgment of relevance applies to the SEARCH RESULTS, not to whether to run the search. If results are empty or irrelevant, proceed silently — do not announce the miss.
 
@@ -131,7 +134,7 @@ Context was just compacted; rules and state may have been dropped. Recover via M
 1. Call \`mel_search\` with queries about the work in progress.
 2. Call \`task_search\` to verify task state.
 
-Memory Operating Rules (rules 1-11, including Task start context recall, Task closure → mel extraction with reason "extracted-from-task", and bidirectional mel ⇌ task linking) remain in effect; reload via \`mel_search\` if details are needed.
+Memory Operating Rules (rules 1-13, including Task start context recall, Task closure → mel extraction with reason "extracted-from-task", bidirectional mel ⇌ task linking, evidence status, and stale-trace pruning) remain in effect; reload via \`mel_search\` if details are needed.
 `;
 
 const FALLBACK_BLOCK = `## Melxis Session Hook

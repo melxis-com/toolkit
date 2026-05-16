@@ -5,6 +5,7 @@ import {
   extractOperationCheckpoints,
   findLastCaptureAnchorIndex,
   findLastClosureAnchorIndex,
+  hasTaskRelatedMelUpdateAfterIndex,
   hasToolCallMatchingAfterIndex,
   PATTERNS,
 } from './melxis-hook.mjs';
@@ -58,6 +59,36 @@ test('post-checkpoint Melxis writes suppress operation checkpoint reminder', () 
   assert.equal(checkpoint.kind, 'git commit');
   assert.equal(checkpoint.entryIndex, 0);
   assert.equal(hasToolCallMatchingAfterIndex(entries, MELXIS_WRITE_TOOL, checkpoint.entryIndex), true);
+});
+
+test('hasTaskRelatedMelUpdateAfterIndex requires related_mel_ids update', () => {
+  const entries = [
+    toolUseEntry('mcp__melxis__.mel_create', { name: 'extracted insight' }),
+    toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'completed' }),
+  ];
+
+  assert.equal(hasTaskRelatedMelUpdateAfterIndex(entries, 0), false);
+});
+
+test('hasTaskRelatedMelUpdateAfterIndex detects task related_mel_ids backlink', () => {
+  const entries = [
+    toolUseEntry('mcp__melxis__.mel_create', { name: 'extracted insight' }),
+    toolUseEntry('mcp__melxis__.task_update', { id: 't1', related_mel_ids: ['m1'] }),
+  ];
+
+  assert.equal(hasTaskRelatedMelUpdateAfterIndex(entries, 0), true);
+});
+
+test('hasTaskRelatedMelUpdateAfterIndex can include the anchor entry via index - 1', () => {
+  const entries = [
+    toolUseEntry('mcp__melxis__.task_update', {
+      id: 't1',
+      status: 'completed',
+      related_mel_ids: ['m1'],
+    }),
+  ];
+
+  assert.equal(hasTaskRelatedMelUpdateAfterIndex(entries, -1), true);
 });
 
 // --- PATTERNS coverage for preference / correction signals ----------------

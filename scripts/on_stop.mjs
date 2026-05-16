@@ -28,6 +28,7 @@ import {
   extractText,
   extractOperationCheckpoints,
   hasToolCallMatchingAfterIndex,
+  hasTaskRelatedMelUpdateAfterIndex,
   findLastCaptureAnchorIndex,
   findLastClosureAnchorIndex,
   PATTERNS,
@@ -44,7 +45,8 @@ ${quoted}
 Apply Memory Operating Rules:
 - **In-moment capture** (Rule 2) — propose save in this turn; do not defer. Apply Recurrence likelihood + Inferability criteria.
 - **Core insight** (Rule 9) — extract WHY, not WHAT.
-- **Retroactive evolution** (Rule 1) — prefer \`mel_patch\` over near-duplicate \`mel_create\`.
+- **Retroactive evolution** (Rule 1) — search existing mels first; prefer \`mel_patch\` / \`mel_update\` over near-duplicate \`mel_create\`.
+- **Signal → action** — decisions/preferences can become decisions; verified root causes can become bug-fix memory; corrections usually refine existing memory; user-reported observations need \`user-reported\` + \`needs-verification\`; hypotheses should become verification tasks, not mel facts.
 
 Skip if the content was trivial. Write behavior follows the active \`MELXIS_WRITE_POLICY\` (set at session start; default \`auto\`).`
   );
@@ -58,9 +60,23 @@ ${quoted}
 Apply Memory Operating Rules:
 - **Task closure feedback** (Rule 7) — evaluate the conversation log, task trace, tool activity, and related mels.
 - If durable feedback exists, prefer refining existing memory first (\`mel_patch\` / \`mel_update\`), or create a new mel when it is genuinely new; link with reason \`extracted-from-task\` where useful.
+- Preserve evidence status: user-reported closure observations need \`user-reported\` + \`needs-verification\`; hypotheses belong in concrete verification tasks, not mel facts.
 - Also consider task granularity lessons and adding relevant mel IDs back to the source task. Skip when nothing is reusable.
 
 Write behavior follows the active \`MELXIS_WRITE_POLICY\` (default \`auto\`).`
+  );
+}
+
+function emitEcosystemBacklinkReminder() {
+  emitText(
+    `Closure memory feedback was observed, but the Melxis task anchor was not linked back to the relevant mel.
+
+Close the Mel ⇄ Task loop:
+- Identify the source task with \`task_search\` / \`task_get\`.
+- If closure patched, updated, or created a durable mel, update the source task's \`related_mel_ids\` with \`task_update\` (read-modify-write; arrays replace).
+- If multiple related mels explain the same work, add \`mel_link_create(reason="part-of" or "extracted-from-task")\` where useful.
+
+Skip only when the mel was unrelated to the task or no durable task context should point to it.`
   );
 }
 
@@ -72,7 +88,8 @@ function emitOperationCheckpointReminder(checkpoints) {
 Apply Memory Operating Rules:
 - Treat the checkpoint as a milestone signal, not an automatic save.
 - If active work maps to a Melxis task, \`task_search\` / \`task_get\` and update status or related context if appropriate.
-- If the trace contains durable insight (WHY) or reusable procedure (HOW), create/link mels using \`extracted-from-task\` or \`part-of\` as appropriate.
+- If the trace contains durable insight (WHY) or reusable procedure (HOW), search existing mels first. Prefer \`mel_patch\` / \`mel_update\` for refinements; use \`mel_create\` only for genuinely new memory. Link with \`extracted-from-task\` or \`part-of\` as appropriate.
+- Preserve evidence status: user-reported observations need \`user-reported\` + \`needs-verification\`; hypotheses should become verification task steps, not mel facts.
 
 Skip if the operation was trivial or already reflected in Melxis. Write behavior follows the active \`MELXIS_WRITE_POLICY\` (default \`auto\`).`
   );
@@ -138,6 +155,9 @@ try {
       /(?:^|[._-])(mel_create|mel_update|mel_patch|mel_link_create)(?:[._-]|$)/,
       lastClosureAnchorIndex,
     );
+  const hasTaskBacklinkAfterClosure =
+    lastClosureAnchorIndex >= 0 &&
+    hasTaskRelatedMelUpdateAfterIndex(entries, lastClosureAnchorIndex - 1);
   const taskCompleted = PATTERNS.taskCompleted.test(text);
 
   const captureSignals = decision.count + insight.count;
@@ -160,6 +180,17 @@ try {
   // writes do not suppress the reminder at closure time.
   if ((closure.count >= 1 || taskCompleted) && !hasMemoryFeedbackAfterClosure) {
     emitClosureReminder(closure.samples);
+  }
+
+  // Mel ⇄ Task ecosystem closure: a mel write after closure is only half of
+  // Rule 8. The source task should point back to the durable mel so future
+  // task resume can recover the rationale without relying on transcript memory.
+  if (
+    (closure.count >= 1 || taskCompleted) &&
+    hasMemoryFeedbackAfterClosure &&
+    !hasTaskBacklinkAfterClosure
+  ) {
+    emitEcosystemBacklinkReminder();
   }
 
   // Operation checkpoint reminder: command-tool-only, transcript-derived.

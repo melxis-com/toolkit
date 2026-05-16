@@ -16,7 +16,7 @@
         "repo": "melxis-com/toolkit"
       },
       "description": "Memory and tasks that feed each other — Mels capture decisions, Tasks track work, and completed Tasks return insights to Mels so the next agent picks up the thread",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "author": {
         "name": "Melxis",
         "email": "support@melxis.com"
