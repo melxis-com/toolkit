@@ -8,6 +8,7 @@ import {
   collectMatches,
   hasMelxisContext,
   shouldInjectBootstrap,
+  shouldInjectCheckpointRecovery,
   shouldInjectDirective,
 } from '../on_user_prompt_submit.mjs';
 
@@ -180,9 +181,34 @@ test('shouldInjectBootstrap: silent when Melxis context is already present', () 
   assert.equal(result.reason, 'context-present');
 });
 
+test('shouldInjectCheckpointRecovery: injects after progress without task_update', () => {
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('assistant', 'implemented the task current state refresh and tested it'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "checkpoint"' }),
+    ],
+  });
+  assert.equal(result.inject, true);
+});
+
+test('shouldInjectCheckpointRecovery: silent after task_update checkpoint', () => {
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('assistant', 'implemented the task current state refresh and tested it'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "checkpoint"' }),
+      toolUseEntry('mcp__melxis__.task_update', { id: 't1', description: 'refreshed' }),
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'task-update-after-checkpoint');
+});
+
 test('buildAdditionalContext: bootstrap only for non-work prompt', () => {
   const context = buildAdditionalContext({ prompt: '今日は良い天気ですか？', entries: [] });
-  assert.match(context, /Recent transcript context does not show Melxis bootstrap/);
+  assert.match(context, /Recent transcript context does not show Melxis context recovery/);
+  assert.match(context, /mel_search\(tags: \["project-orientation"\]\)/);
+  assert.match(context, /hive_search\(query: "<inferred project name>"\)/);
+  assert.doesNotMatch(context, /<cwd basename>|<repo name>|raw filesystem paths/i);
   assert.doesNotMatch(context, /task_create/);
 });
 
@@ -191,9 +217,26 @@ test('buildAdditionalContext: combines bootstrap and task directive for multi-st
     prompt: 'この WebSocket バグを調査して修正してほしい',
     entries: [],
   });
-  assert.match(context, /Recent transcript context does not show Melxis bootstrap/);
+  assert.match(context, /Recent transcript context does not show Melxis context recovery/);
+  assert.match(context, /mel_search\(tags: \["project-orientation"\]\)/);
+  assert.match(context, /hive_search\(query: "<inferred project name>"\)/);
   assert.match(context, /task_update/);
   assert.match(context, /task_create/);
+  assert.match(context, /Read-only Q&A still needs session context recovery/);
+});
+
+test('buildAdditionalContext: includes checkpoint recovery before next turn', () => {
+  const context = buildAdditionalContext({
+    prompt: '続けてください',
+    entries: [
+      textEntry('assistant', 'implemented the task current state refresh and tested it'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "checkpoint"' }),
+    ],
+  });
+  assert.match(context, /may not be reflected in Melxis yet/);
+  assert.match(context, /compressed current state/);
+  assert.match(context, /sub-tasks/);
+  assert.match(context, /extracted-from-task/);
 });
 
 // --- executable output contract ------------------------------------------
@@ -213,7 +256,8 @@ test('main hook emits UserPromptSubmit additionalContext JSON', () => {
 
   const output = JSON.parse(child.stdout);
   assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-  assert.match(output.hookSpecificOutput.additionalContext, /Melxis bootstrap/);
+  assert.match(output.hookSpecificOutput.additionalContext, /Melxis context recovery/);
+  assert.match(output.hookSpecificOutput.additionalContext, /hive_search\(query: "<inferred project name>"\)/);
   assert.match(output.hookSpecificOutput.additionalContext, /task_create/);
 });
 
@@ -232,6 +276,7 @@ test('main hook emits bootstrap JSON for cleared-context prompt', () => {
 
   const output = JSON.parse(child.stdout);
   assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-  assert.match(output.hookSpecificOutput.additionalContext, /Melxis bootstrap/);
+  assert.match(output.hookSpecificOutput.additionalContext, /Melxis context recovery/);
+  assert.match(output.hookSpecificOutput.additionalContext, /hive_search\(query: "<inferred project name>"\)/);
   assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /task_create/);
 });

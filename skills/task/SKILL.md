@@ -22,7 +22,8 @@ when_to_use: Use when the user plans multi-step work ("let's split into steps", 
 | Search tasks | `task_search` | Find tasks by keyword, status, tags, or owner |
 | Get task | `task_get` | Retrieve full detail of a task (description, resolved `related_tasks` / `related_mels`, sub_tasks) |
 | Create task | `task_create` | Plan multi-step work across sessions |
-| Update task | `task_update` | Update status, priority, or details of a task |
+| Patch task | `task_patch` | Localized edits to task descriptions / handoff snapshots |
+| Update task | `task_update` | Update status, priority, links, or full task details |
 | Delete task | `task_delete` | Remove completed or cancelled tasks |
 
 ---
@@ -39,6 +40,22 @@ Create or update tasks when:
 
 If Melxis MCP tools are unavailable, or a Melxis MCP call fails because of authentication, token, or connection errors, tell the user explicitly. Do not silently continue as if tasks were checked or updated. Ask the user to reconnect or sign in to Melxis MCP, then retry the Melxis call after they confirm. On Codex CLI, suggest `codex mcp login melxis`.
 
+Routine Melxis bookkeeping stays silent; see AGENTS.md §Routine Melxis Bookkeeping. MCP availability, authentication, token, and connection failures are not routine and must still be reported.
+
+---
+
+## Resume / Checkpoint Recovery
+
+When resuming work or recovering after a missed checkpoint, do more than find the task. If progress is not reflected in Melxis, call `task_patch` or `task_update` before substantive work:
+
+- Refresh the parent task `description` as compressed current state, not append-only history. Prefer `task_patch` for localized section replacement; if it fails due to stale text, call `task_get` and fall back to `task_update(description=...)` with a freshly compressed state.
+- Update `status`, `priority`, `tags`, and `related_mel_ids` when the current state changed.
+- Keep the parent task as goal / why / Definition of Done.
+- Create or update sub-tasks for independently resumable remaining work with separate completion criteria.
+- Do not create sub-tasks for ephemeral same-turn steps.
+
+Routine updates stay silent unless they affect the user-facing answer or require a real user decision.
+
 ---
 
 ## Search Tasks
@@ -51,7 +68,7 @@ task_search(hive_id: "<hive-id>", parent_task_id: "root")
 task_search(hive_id: "<hive-id>", ids: ["<id1>", "<id2>", ...])  # batch hydrate
 ```
 
-`ids` resolves a known list (e.g. `related_task_ids`) in one round-trip — up to 100 IDs per call. Use `task_get` only when you need the full description of a single task.
+`ids` resolves a known list (e.g. `related_task_ids`) in one round-trip — up to 50 IDs per call. Use `task_get` only when you need the full description of a single task.
 
 Supports filtering by:
 - `query` — keyword match on title
@@ -102,10 +119,13 @@ task_create(
 ### Update a task
 
 ```
+task_patch(id: "<task-id>", old_text: "Current: ...", new_text: "Current: ...")
 task_update(id: "<task-id>", status: "in_progress")
 task_update(id: "<task-id>", status: "completed")
 task_update(id: "<task-id>", priority: "urgent", tags: ["blocker"])
 ```
+
+Use `task_patch` for localized `description` edits, especially handoff snapshot / current-state sections. It is content-addressed like `mel_patch`: if `old_text` is missing or matches multiple places, the tool fails rather than appending ambiguous text. On failure, call `task_get`, rebuild the intended section from the latest description, and use `task_update(description=...)`.
 
 Status flow: `pending` → `in_progress` → `completed` / `cancelled`.
 
@@ -152,8 +172,9 @@ A task is shared intent — externalized reasoning state that the next agent or 
 
 - **Status reflects commitment, not activity** (BDI-style intent tracking): `pending` = planned but not yet committed to act on; `in_progress` = actively being worked on right now; `completed` = the definition-of-done is met; `cancelled` = explicitly abandoned with a reason recorded in the description. Avoid silently leaving tasks in `in_progress` when work has stopped — either move them back to `pending`, mark `cancelled` with a reason, or finish to `completed`. To reopen a `completed` task, create a new task that links back to the old one rather than flipping the status.
 - **Keep task granularity to one independently resumable intention** (GTD/PARA + BDI discipline): a task should have one coherent definition of done that the next agent can resume from `description` + `related_mel_ids`. Split when a task contains multiple independent outcomes, different priorities, different owners/surfaces, or separate completion criteria. Do not split merely because the title mentions multiple files, products, or surfaces if the DoD is one coherent outcome (e.g. "LP / Web / MCP guide consistency check").
+- **Split implementation from verification when verification outlives coding**: if dogfood, real-client behavior, release readiness, external environment checks, or user-reported observations remain after code/tests pass, close the implementation task and create a separate verification task with `related_task_ids` pointing to the implementation task. When useful, read-modify-write the implementation task's `related_task_ids` back to the verification task; do not rely on description-only references. Do not split routine unit tests, lint, or same-session checks into separate tasks.
 - **Title carries the why, description carries the how and the thinking** (reason-and-act framing): make the root task title express the goal or motivation, and sub-task titles express the concrete step. Use `description` to record the definition of done plus the trace of thinking — alternatives considered, blockers encountered, evidence gathered, and concrete checks still needed. The next agent should be able to resume from `description` alone.
-- **Parent task descriptions are compressed current state, not logs** (GTD/PARA + ReAct discipline): do not append every turn or completed step. Keep parent descriptions focused on Goal, Current state, Scope/constraints, Evidence status, and links. When old notes stop helping the next agent act, replace them with a shorter summary via `task_update`.
+- **Parent task descriptions are compressed current state, not logs** (GTD/PARA + ReAct discipline): do not append every turn or completed step. Keep parent descriptions focused on Goal, Current state, Scope/constraints, Evidence status, and links. When old notes stop helping the next agent act, replace them with a shorter summary via `task_patch`; use `task_update(description=...)` when the whole description needs rewriting.
 - **Use sub-tasks for independently resumable next actions**: if a next action can be picked up in a later session, has its own completion condition, or can be owned/reviewed separately, create it as a sub-task instead of adding another bullet to the parent description. Do not create sub-tasks for ephemeral single-session steps such as "open file", "run test", or "inspect diff".
 - **Preserve evidence status in the task trace** (provenance discipline): task descriptions should separate facts, user reports, and next actions. Avoid carrying hypotheses unless they are needed to define a concrete verification step. If a claim is based only on user report (dogfood behavior, trigger rates, client differences), mark it as user-reported / needs-verification in the description and add `user-reported` / `needs-verification` tags when useful. Promote it with `task_update` after logs, transcripts, code, docs, or other evidence confirms it. User preferences and explicit decisions can be recorded directly, but split out any external factual claim that still needs verification.
 - **Priority is engagement, not importance** (GTD-style "engage" layer): priority signals when you intend to act. `urgent` / `high` / `normal` mean it belongs on the active radar; `low` is a Someday/Maybe parking lot for ideas you may revisit but are not committing to now.

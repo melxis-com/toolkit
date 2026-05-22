@@ -105,24 +105,29 @@ Call any write tool (incl. deletion) directly when intent is clear and judgement
 
 const STARTUP_BLOCK = `## Melxis Session Bootstrap
 
-Melxis growing-memory is connected via MCP. Restore cross-session context before responding to the first message and form a compact **session brief** in your working context.
+Melxis growing-memory is available via MCP. Restore cross-session context before responding to the first message and form a compact **session brief** in your working context.
 
-1. Call \`mel_search\` with project-context keywords (cwd basename, repo name) and \`tags=["project-orientation"]\`, \`limit=5\`. Omit \`hive_ids\` — that searches across every hive accessible to you in a single call.
-2. If a project-orientation mel surfaces, use its hive as the project hive: call \`task_search\` for active/relevant root tasks in that hive. Follow the orientation mel's scope and tagging conventions for the rest of the session. **If the user's first request implies non-trivial multi-step work (bug investigation, refactor, feature implementation, review-driven polish loop), anchor the work BEFORE substantive implementation: use \`task_update(status="in_progress")\` for an existing matching task, otherwise propose \`task_create\`. The task is the anchor for Rules 6 / 7 / 8 (start / closure / bidirectional). Skip for trivial one-shot edits (typo, single-line fix, pure exploration). **Miscalibration signal**: if you skip task anchoring and the work then spans 3+ tool calls, or crosses turn boundaries, or surfaces a root cause / decision that would qualify as a save trigger, you skipped wrongly — update an existing matching task or create one retroactively. Skip is valid only for trivial one-shot edits (typo, single-line fix, pure read-only exploration).**
-3. Build the session brief from the loaded context: project-orientation, active/relevant root tasks, task-related or high-link mels, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks).
-4. If no orientation surfaces, fall back to \`hive_search\` to see what's available. Ask the user once which hive to use (or whether to create one). On confirmation, propose a project-orientation mel as the first entry so this question never recurs.
+1. Call \`mel_search(tags: ["project-orientation"])\` without a query to get memory-prior orientation candidates, and call \`hive_search(query: "<inferred project name>")\` using a project name inferred from local project context. Do not expose raw local details.
+2. Resolve the hive from agreement/confidence across those two result sets. If \`hive_search\` resolves a hive that the first \`mel_search\` did not return, call \`mel_search(hive_ids: ["<resolved hive id>"], tags: ["project-orientation"])\` to recover that hive's orientation entrypoint.
+3. If a hive is resolved, call \`task_search(hive_id: "<resolved hive id>", sort: "recency")\` without \`parent_task_id\` for recent-session handoff recovery. If both searches miss or candidates are ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context.
+4. Use the recovered context silently as the session brief. Routine Melxis bookkeeping stays silent; report MCP availability/auth/token/connection failures.
+5. If a handoff task exists and recent progress is not reflected in its description/status/related_mel_ids, call \`task_update\` to refresh the task as compressed current state before continuing.
+6. Keep the parent task as goal / why / Definition of Done. Create or update sub-tasks for independently resumable remaining work with separate completion criteria; do not create sub-tasks for ephemeral same-turn steps.
+7. If the user's first request implies non-trivial multi-step work (bug investigation, refactor, feature implementation, review-driven polish loop), anchor the work BEFORE substantive implementation: use \`task_update(status="in_progress")\` for an existing matching task, otherwise propose \`task_create\`. The task is the anchor for Rules 6 / 7 / 8 (start / closure / bidirectional).
+8. Skip task anchoring only for trivial one-shot edits (typo, single-line fix, pure read-only Q&A). Read-only Q&A still needs session context recovery; do not let the task-anchor skip become a permanent session-context skip. If skipped work later spans 3+ tool calls, crosses turn boundaries, or surfaces a root cause / decision that qualifies as a save trigger, update an existing matching task or create one retroactively.
 
-IMPORTANT: This bootstrap is a hard precondition — execute step 1 (\`mel_search\` with \`tags=["project-orientation"]\`) before any other tool call or assistant text. The judgment of relevance applies to the SEARCH RESULTS, not to whether to run the search. If results are empty or irrelevant, proceed silently — do not announce the miss.
+IMPORTANT: This recovery is a hard precondition — execute step 1 before any other tool call or assistant text. If recovery returns no relevant context, proceed silently without announcing the miss.
 
-Note: Melxis MCP tools may be deferred-loaded by your harness (schemas not pre-registered). If \`mel_search\` is not directly callable, load schemas first via your harness's tool-loading mechanism (Claude Code: ToolSearch with \`select:mel_search,task_search,hive_search,mel_get\`) before step 1.
+Note: Melxis MCP tools may be deferred-loaded by your harness (schemas not pre-registered). If a required Melxis tool is not directly callable, load schemas first via your harness's tool-loading mechanism.
 `;
 
 const RESUME_BLOCK = `## Melxis Session Resumed
 
 Session resumed. Refresh memory state before continuing:
 
-1. Call \`mel_search\` for recent updates relevant to the current task.
-2. Call \`task_search\` with \`status="in_progress"\` to verify ongoing work.
+1. Use the SessionStart atomic recovery flow: \`mel_search(tags: ["project-orientation"])\` + \`hive_search(query: "<inferred project name>")\`, then scoped orientation lookup and \`task_search(sort: "recency")\` if a hive is resolved.
+2. Use the recovered handoff task and orientation context silently.
+3. If progress is not reflected in the active task, refresh its compressed current state with \`task_update\`; split independently resumable remaining work into sub-tasks instead of appending everything to the parent.
 
 Memory Operating Rules established at session start remain in effect.
 `;
@@ -131,8 +136,9 @@ const COMPACT_BLOCK = `## Melxis Post-Compaction Recovery
 
 Context was just compacted; rules and state may have been dropped. Recover via Melxis:
 
-1. Call \`mel_search\` with queries about the work in progress.
-2. Call \`task_search\` to verify task state.
+1. Use the SessionStart atomic recovery flow: \`mel_search(tags: ["project-orientation"])\` + \`hive_search(query: "<inferred project name>")\`, then scoped orientation lookup and \`task_search(sort: "recency")\` if a hive is resolved.
+2. Use the recovered project/task/memory state silently.
+3. If compaction lost recent task progress, refresh the active task's compressed current state and sub-task structure before continuing.
 
 Memory Operating Rules (rules 1-13, including Task start context recall, Task closure → mel extraction with reason "extracted-from-task", bidirectional mel ⇌ task linking, evidence status, and stale-trace pruning) remain in effect; reload via \`mel_search\` if details are needed.
 `;

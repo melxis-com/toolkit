@@ -1,13 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import {
   extractOperationCheckpoints,
   findLastCaptureAnchorIndex,
   findLastClosureAnchorIndex,
+  findLastSubstantialProgressIndex,
+  hasSubstantialProgressSignal,
+  hasTaskLikeContext,
   hasTaskRelatedMelUpdateAfterIndex,
+  hasTaskUpdateAfterIndex,
   hasToolCallMatchingAfterIndex,
   PATTERNS,
+  readTranscriptTail,
 } from './melxis-hook.mjs';
 
 const MELXIS_WRITE_TOOL =
@@ -59,6 +68,73 @@ test('post-checkpoint Melxis writes suppress operation checkpoint reminder', () 
   assert.equal(checkpoint.kind, 'git commit');
   assert.equal(checkpoint.entryIndex, 0);
   assert.equal(hasToolCallMatchingAfterIndex(entries, MELXIS_WRITE_TOOL, checkpoint.entryIndex), true);
+});
+
+test('on_stop stays non-blocking and silent for Melxis heuristic checkpoints', () => {
+  const child = spawnSync(process.execPath, ['scripts/on_stop.mjs'], {
+    cwd: new URL('../..', import.meta.url),
+    input: JSON.stringify({ transcript_path: '' }),
+    encoding: 'utf8',
+  });
+
+  assert.equal(child.status, 0);
+  assert.equal(child.stderr, '');
+  assert.equal(child.stdout, '');
+});
+
+test('readTranscriptTail rejects symlinked transcript paths outside home', () => {
+  const localDir = mkdtempSync(resolve(process.cwd(), '.tmp-melxis-hook-test-'));
+  const outsideDir = mkdtempSync(join(tmpdir(), 'melxis-hook-test-'));
+  try {
+    const outsideTranscript = join(outsideDir, 'transcript.jsonl');
+    const linkPath = join(localDir, 'transcript-link.jsonl');
+    writeFileSync(outsideTranscript, '{"message":{"content":"secret"}}\n');
+    symlinkSync(outsideTranscript, linkPath);
+
+    assert.deepEqual(readTranscriptTail(linkPath), []);
+  } finally {
+    rmSync(localDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test('readTranscriptTail reads regular transcript paths under home', () => {
+  const localDir = mkdtempSync(resolve(process.cwd(), '.tmp-melxis-hook-test-'));
+  try {
+    const transcript = join(localDir, 'transcript.jsonl');
+    writeFileSync(transcript, '{"line":1}\n{"line":2}\n');
+
+    assert.deepEqual(readTranscriptTail(transcript, 1), ['{"line":2}']);
+  } finally {
+    rmSync(localDir, { recursive: true, force: true });
+  }
+});
+
+test('hasTaskUpdateAfterIndex only counts task updates after the checkpoint', () => {
+  const entries = [
+    toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'in_progress' }),
+    toolUseEntry('functions.exec_command', { cmd: 'git commit -m "hook behavior"' }),
+  ];
+
+  assert.equal(hasTaskUpdateAfterIndex(entries, 1), false);
+  assert.equal(hasTaskUpdateAfterIndex(entries, 0), false);
+  assert.equal(hasTaskUpdateAfterIndex(entries, -1), true);
+});
+
+test('task-like context can come from an active Melxis task or task wording', () => {
+  assert.equal(hasTaskLikeContext([toolUseEntry('mcp__melxis__.task_create', { name: 'hooks' })]), true);
+  assert.equal(hasTaskLikeContext([textEntry('user', 'please review this implementation')]), true);
+  assert.equal(hasTaskLikeContext([textEntry('user', 'what is the weather')]), false);
+});
+
+test('substantial progress signal detects progress text and latest index', () => {
+  const entries = [
+    textEntry('assistant', 'starting'),
+    textEntry('assistant', 'implemented the hook behavior and tested it'),
+  ];
+
+  assert.equal(hasSubstantialProgressSignal(entries), true);
+  assert.equal(findLastSubstantialProgressIndex(entries), 1);
 });
 
 test('hasTaskRelatedMelUpdateAfterIndex requires related_mel_ids update', () => {

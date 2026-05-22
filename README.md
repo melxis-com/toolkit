@@ -41,6 +41,8 @@ Codex's plugin hooks integration is still an under-development feature, so setup
 
 4. **Approve the bundled hooks** — in the Codex TUI, open `/hooks` and approve `SessionStart`, `Stop`, and `TaskCompleted`. Codex blocks plugin hooks from running until you approve them once.
 
+After these steps, `/clear`, resume, and compaction boundaries can reload Melxis guidance through the approved lifecycle hooks. If context is not restored after `/clear`, check both `/plugins` and `/hooks`.
+
 ### Generic MCP
 
 Any MCP-capable client (Claude Desktop, ChatGPT, Cursor, VS Code, Cline, etc.) can connect to the hosted MCP endpoint directly:
@@ -50,6 +52,8 @@ https://mcp.melxis.com
 ```
 
 OAuth authentication starts automatically on the first tool call. No client-side files required.
+
+Generic MCP clients receive Melxis MCP instructions for model-controlled recall, but they do not run local lifecycle hooks.
 
 ## Quick Start
 
@@ -73,9 +77,9 @@ If the agent can call `hive_search`, `mel_search`, or `task_search` after OAuth,
 
 If the agent reports that Melxis MCP tools are unavailable, or that a Melxis MCP call failed because of authentication, token, or connection errors, reconnect or sign in to Melxis MCP and ask the agent to retry the Melxis check. On Codex CLI, run `codex mcp login melxis`.
 
-That's it. Your agent will automatically:
+That's it. Depending on the client surface, Melxis can guide the agent to:
 
-- **Restore context** from previous sessions when starting work
+- **Restore context** from previous sessions via plugin hooks or model-controlled Melxis searches
 - **Check existing knowledge** before implementing changes
 - **Save design decisions** and learnings as they come up
 - **Track tasks** and hand off unfinished work across sessions
@@ -88,7 +92,7 @@ For github-referenced installs, Claude Code requires refreshing the marketplace 
 |----------|--------|
 | Claude Code | `/plugin marketplace update melxis-com-toolkit` then `/plugin install melxis@melxis-com-toolkit` (re-install pulls the new version) |
 | Codex CLI | `codex plugin marketplace upgrade melxis-com-toolkit` (re-fetches the marketplace cache) |
-| Generic MCP | Server-side changes apply automatically; restart the MCP connection to refresh tool descriptions |
+| Generic MCP | Server-side changes apply automatically; restart the MCP connection to refresh tool descriptions and MCP instructions |
 
 ## What's Included
 
@@ -98,9 +102,9 @@ Different install surfaces provide different levels of automation:
 |---------|-----------|----------------|-----------------|
 | Claude Code plugin | Yes | Yes | Yes |
 | Codex CLI | Yes | Skills + Hooks | Yes (`plugin_hooks`) |
-| Generic MCP | Yes | MCP `instructions` only | No |
+| Generic MCP | Yes | MCP `instructions` | No |
 
-MCP-only installs can search, create, update, link, and delete mels/tasks, but they do not run local lifecycle hooks.
+MCP-only installs can search, create, update, link, and delete mels/tasks. They rely on MCP instructions and the model's use of atomic Melxis searches for recall; they do not run local lifecycle hooks.
 
 ## Skills
 
@@ -115,8 +119,8 @@ On Claude Code and Codex CLI, the toolkit ships hooks that surface Melxis at the
 
 | Hook | When it fires | What it does |
 |------|--------------|--------------|
-| SessionStart | startup / resume / post-compaction | Prompts the agent to recall prior context (`mel_search` with `tags: ["project-orientation"]` → `task_search`) before responding, and injects the active **Write policy** block |
-| Stop | end of each assistant response | Prompts the agent to evaluate whether anything is worth saving; also treats operation checkpoints such as `git commit` / `git push` as milestone signals |
+| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context with `mel_search(tags=["project-orientation"])`, `hive_search(query="<inferred project name>")`, scoped orientation lookup when needed, and `task_search(sort="recency")` after hive resolution; also injects the active **Write policy** block |
+| Stop | end of each assistant response | Silent non-blocking safety check; routine checkpoint recovery is handled on the next prompt or session boundary |
 | TaskCompleted | a task is marked completed | Prompts learning extraction, task granularity audit, and link proposals |
 | PreCompact | before context compaction | Captures session state before compaction |
 
@@ -133,6 +137,8 @@ Override behaviour depends on the client surface:
 - **Generic MCP clients:** make the desired write policy part of the agent context using your client's instruction-loading mechanism.
 
 `AGENTS.md` is included as a Codex project-instruction template. Codex reads it when it is placed where Codex project instructions are loaded; the copy inside an installed plugin is not a write-policy override by itself.
+
+Routine Melxis bookkeeping stays silent; see [AGENTS.md](AGENTS.md#routine-melxis-bookkeeping) for the shared rule. MCP availability, authentication, token, and connection failures should still be reported so the user can reconnect and retry.
 
 | Value | Behaviour |
 |-------|-----------|

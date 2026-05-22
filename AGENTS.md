@@ -11,9 +11,13 @@ Search prior knowledge when the user:
 - asks what is pending ("what's left", "残っているタスク")
 - starts a task that may intersect with existing knowledge
 
-Flow: `hive_search` → `mel_search` (or `task_search`) → `mel_get` for detail. If no relevant memory is found, proceed silently.
+Flow: `mel_search(tags=["project-orientation"])` + `hive_search(query="<inferred project name>")` → scoped orientation lookup if needed → `task_search(sort="recency")` when a hive is resolved → `mel_get` for one full mel only when needed. Infer the project name from local project context without exposing raw local details. If no relevant memory is found, proceed silently.
 
 If Melxis MCP tools are unavailable, or a Melxis MCP call fails because of authentication, token, or connection errors, tell the user explicitly. Do not silently continue as if memory or tasks were checked. Ask the user to reconnect or sign in to Melxis MCP, then retry the Melxis call after they confirm. On Codex CLI, suggest `codex mcp login melxis`.
+
+## Routine Melxis Bookkeeping
+
+Routine successful Melxis reads/writes are operational bookkeeping; keep them silent unless they affect the user-facing answer. MCP availability, authentication, token, and connection failures are not routine and must still be reported.
 
 ## When to save (auto by default)
 
@@ -29,6 +33,8 @@ Default behavior: call write tools directly when judgement criteria (Recurrence 
 User-reported observations are not automatically verified facts. If the only evidence is the user's report (dogfood results, trigger rates, client behavior, competitor behavior), save mels with `user-reported` and `needs-verification` tags and state the verification status in the summary/content. Do the same in task descriptions when the task trace contains unverified observations; add `user-reported` / `needs-verification` task tags when useful. Avoid carrying hypotheses unless they are needed to define a concrete verification step. Promote or sharpen later with `mel_patch` / `mel_update` or `task_update` after logs, transcripts, code, docs, or another evidence source confirms it. User preferences and explicit decisions can be saved directly; split out any external factual claims that need verification.
 
 Keep mels and tasks compact. A mel should be one durable insight with minimal evidence, not a transcript. A parent task description should be compressed current state, not an append-only log. Put independently resumable next actions into sub-tasks; leave ephemeral single-session steps out of Melxis tasks. Replace stale task description sections with `task_update` rather than appending indefinitely.
+
+When resuming or recovering work, update the active task before continuing if progress is not reflected in Melxis. Refresh `description` as compressed current state, update `status` / `priority` / `tags` / `related_mel_ids` when changed, and split independently resumable remaining work into sub-tasks instead of stuffing the parent description.
 
 ## Project orientation — first mel in each hive
 

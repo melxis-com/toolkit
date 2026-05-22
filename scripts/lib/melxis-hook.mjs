@@ -5,8 +5,8 @@
 //   - No filesystem writes anywhere. The harness owns transcript_path; we only read it.
 //   - Defensive parsing: malformed JSONL lines are skipped, not fatal.
 //   - All errors → STDERR (one line) + exit 0, so the hook never blocks the agent.
-import { readFileSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 
 export function readStdinJson() {
@@ -24,9 +24,15 @@ export function readStdinJson() {
 // honest with the README's transparency claims.
 export function readTranscriptTail(path, maxLines = 200) {
   if (!path) return [];
-  const resolved = resolve(path);
-  const home = homedir();
-  if (!home || !resolved.startsWith(home)) return [];
+  let resolved;
+  let home;
+  try {
+    resolved = realpathSync(resolve(path));
+    home = realpathSync(homedir());
+  } catch {
+    return [];
+  }
+  if (!home || (resolved !== home && !resolved.startsWith(`${home}${sep}`))) return [];
   try {
     statSync(resolved);
   } catch {
@@ -167,6 +173,15 @@ export function hasTaskRelatedMelUpdateAfterIndex(entries, index) {
     if (entryHasTaskRelatedMelUpdate(entries[i])) return true;
   }
   return false;
+}
+
+export function hasTaskUpdateAfterIndex(entries, index) {
+  if (!Array.isArray(entries)) return false;
+  const start = Math.max(0, index + 1);
+  return hasToolCallMatching(
+    entries.slice(start),
+    /(?:^|[._-])task_update(?:[._-]|$)/,
+  );
 }
 
 // Check whether a single transcript entry's message text matches a pattern.
@@ -312,6 +327,33 @@ export function extractOperationCheckpoints(entries) {
   return checkpoints;
 }
 
+export function hasTaskLikeContext(entries) {
+  if (!Array.isArray(entries)) return false;
+  if (hasActiveMelxisTask(entries)) return true;
+  if (hasToolCallMatching(entries, /(?:^|[._-])(?:task_search|task_get|task_create|task_update)(?:[._-]|$)/)) {
+    return true;
+  }
+  const text = extractText(entries);
+  return /\b(task|plan|todo|checkpoint|milestone|implementation|fix|bug|review|refactor|investigation)\b|タスク|計画|実装|修正|調査|レビュー|リファクタ/i.test(
+    text,
+  );
+}
+
+export function hasSubstantialProgressSignal(entries) {
+  return findLastSubstantialProgressIndex(entries) >= 0;
+}
+
+const SUBSTANTIAL_PROGRESS_PATTERN =
+  /\b(implemented|fixed|changed|updated|added|removed|committed|pushed|tested|verified|completed|finished|done)\b|実装した|修正した|変更した|追加した|削除した|コミット|プッシュ|テスト|確認した|完了/i;
+
+export function findLastSubstantialProgressIndex(entries) {
+  if (!Array.isArray(entries)) return -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entryTextMatchesPattern(entries[i], SUBSTANTIAL_PROGRESS_PATTERN)) return i;
+  }
+  return -1;
+}
+
 // Detect whether the recent transcript shows an active Melxis task. An
 // "active" task is one that has been created (via task_create) or transitioned
 // to in_progress (via task_update) without a subsequent closure transition
@@ -325,7 +367,6 @@ export function extractOperationCheckpoints(entries) {
 export function hasActiveMelxisTask(entries) {
   if (!Array.isArray(entries)) return false;
   let active = false;
-  const stack = [...entries];
   // Walk entries in order via a queue; we want chronological transitions so
   // that a later completed/cancelled clears an earlier in_progress.
   for (const entry of entries) {
@@ -396,37 +437,7 @@ export const PATTERNS = {
     /(root cause|caused by|was caused|原因は|原因が判明|the bug was|refactor(ed|ing)|リファクタ|stop doing|no not that|やめて)/i,
   closure: /(shipped|pushed|landed|merged|done with|完了|できた|終わった|finished|ship it)/i,
   save: /(mel_create|task_create|mel_update|mel_patch|task_update|mel_link_create)/,
-  taskCompleted: /task_update[^"]*"status"[^"]*"(completed|cancelled)"/,
 };
-
-// Strip markdown / instruction-framing characters from a transcript excerpt
-// before quoting it back into the agent's prompt. Without this, an attacker
-// who plants "## New instructions" in mel content (which the agent later
-// echoes) could craft a line that appears in the hook's blockquote with
-// active markdown structure that some clients render as headings or code.
-function sanitizeQuotedLine(line) {
-  return line.replace(/[`*#<>]/g, '');
-}
-
-// Count and capture matched lines from text.
-// Returns { count, samples }: samples are at most maxSamples lines, each
-// truncated to 200 chars, sanitized of markdown framing, and prefixed
-// with "  > " for blockquote feel.
-export function captureMatches(text, pattern, maxSamples = 3) {
-  const lines = text.split('\n');
-  const matched = [];
-  let count = 0;
-  for (const line of lines) {
-    if (pattern.test(line)) {
-      count += 1;
-      if (matched.length < maxSamples) {
-        const trimmed = sanitizeQuotedLine(line.replace(/^\s+/, '').slice(0, 200));
-        matched.push(`  > ${trimmed}`);
-      }
-    }
-  }
-  return { count, samples: matched };
-}
 
 export function emitText(text) {
   process.stdout.write(text);

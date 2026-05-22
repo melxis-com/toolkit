@@ -2,8 +2,8 @@
 // Hook: UserPromptSubmit
 //
 // Injects lightweight Melxis context recovery when recent transcript context
-// does not show a Melxis bootstrap/tool call, and injects a "your FIRST tool
-// action after bootstrap MUST anchor the task" directive when the user's prompt
+// does not show a Melxis recovery/tool call, and injects a "your FIRST tool
+// action after recovery MUST anchor the task" directive when the user's prompt
 // looks like multi-step work AND no Melxis task is currently active.
 //
 // Design constraints (consistent with the other Cut 4 hooks):
@@ -18,6 +18,11 @@ import {
   hasActiveMelxisTask,
   hasToolCallMatching,
   extractText,
+  extractOperationCheckpoints,
+  findLastCaptureAnchorIndex,
+  findLastSubstantialProgressIndex,
+  hasTaskLikeContext,
+  hasTaskUpdateAfterIndex,
 } from './lib/melxis-hook.mjs';
 
 // Multi-step work keywords. Kept conservative — these are verbs that imply
@@ -35,24 +40,33 @@ const TRIVIAL_PATTERN = /(trivial|typo|簡単|ちょっと|軽く)/i;
 const DIRECTIVE_TEMPLATE = (matched) =>
   `[melxis] This appears to be multi-step work (matched keywords: ${matched}).
 
-Your FIRST action after Melxis bootstrap (project-orientation mel_search + task_search) MUST anchor the work in a Melxis task:
+Your FIRST action after Melxis context recovery MUST anchor the work in a Melxis task:
 - If an existing task matches this work, call \`task_update\` to set it \`in_progress\` and refresh its compressed current state.
 - If no existing task matches, call \`task_create\`.
 
 Without the task anchor, Rules 6/7/8 (start/closure/bidirectional) lose their fire point and the loop breaks at stage 4 (Feedback).
 
-Skip only if the work is genuinely trivial (typo, single-line fix, pure read-only Q&A). If you proceed without task anchoring and then surface a root cause / decision / multi-step branch, the miscalibration signal in STARTUP_BLOCK applies: update an existing matching task or create one retroactively.
+Skip task anchoring only if the work is genuinely trivial (typo, single-line fix, pure read-only Q&A). Read-only Q&A still needs session context recovery; do not let the task-anchor skip become a permanent session-context skip. If you proceed without task anchoring and then surface a root cause / decision / multi-step branch, update an existing matching task or create one retroactively.
 `;
 
-const BOOTSTRAP_TEMPLATE = `[melxis] Recent transcript context does not show Melxis bootstrap/context recovery.
+const BOOTSTRAP_TEMPLATE = `[melxis] Recent transcript context does not show Melxis context recovery.
 
-Before answering the user's prompt, restore project context and form a compact session brief:
-1. Call \`mel_search\` with project-context keywords (cwd basename, repo name) and \`tags=["project-orientation"]\`, \`limit=5\`. Omit \`hive_ids\`.
-2. If a project-orientation mel surfaces, call \`task_search\` for active/relevant tasks in that hive. Prefer resuming an existing matching task via \`task_update(status="in_progress")\` over creating a duplicate task.
-3. Build the session brief from project-orientation, active/relevant tasks, task-related or high-link mels, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks).
-4. Use the session brief silently. If search results are empty or irrelevant, proceed normally without announcing the miss.
+Before answering the user's prompt, run the atomic Melxis recovery flow: call \`mel_search(tags: ["project-orientation"])\` without a query and \`hive_search(query: "<inferred project name>")\`, using a project name inferred from local project context without exposing raw local details. Resolve the hive from agreement/confidence; if \`hive_search\` resolves a hive not returned by the orientation search, run \`mel_search(hive_ids: ["<resolved hive id>"], tags: ["project-orientation"])\`. If a hive is resolved, call \`task_search(hive_id: "<resolved hive id>", sort: "recency")\` without \`parent_task_id\` for recent-session handoff recovery. If unresolved/ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered orientation, handoff task context, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks) as a compact session brief.
 
-This is a lightweight recovery path for cleared/compacted context; do not create or update memory from this reminder alone.
+This is a lightweight recovery path for cleared/compacted context. Do not create or update memory from this reminder alone. Routine Melxis bookkeeping stays silent; report MCP availability/auth/token/connection failures.
+`;
+
+const CHECKPOINT_RECOVERY_TEMPLATE = `[melxis] Recent transcript suggests task-like progress may not be reflected in Melxis yet.
+
+Before substantive work, silently refresh the active/relevant task if needed:
+- Update the parent task description as compressed current state, not append-only history.
+- Update status, priority, tags, and related_mel_ids when the current state changed.
+- Keep the parent task as goal / why / Definition of Done; create or update sub-tasks for independently resumable remaining work with separate completion criteria.
+- Do not create sub-tasks for ephemeral same-turn steps.
+- If task-derived memory is durable, search existing mels first, prefer \`mel_patch\` / \`mel_update\`, use \`mel_create\` only for genuinely new memory, link with reason "extracted-from-task" where useful, and add relevant mel IDs back to the source task.
+- User-reported observations need \`user-reported\` + \`needs-verification\`; hypotheses should become verification tasks, not mel facts.
+
+Routine Melxis bookkeeping stays silent; do not explain a skip to the user.
 `;
 
 // Extract every matched keyword from the prompt so the injected directive
@@ -90,7 +104,7 @@ export function hasMelxisContext(entries) {
     return true;
   }
   const text = extractText(entries);
-  return /\bMelxis Session Bootstrap\b|\bmelxis hive\b|project-orientation|Called plugin:melxis:melxis|Called plugin:melxis:memory|Called plugin:melxis:task/i.test(
+  return /\bMelxis Session Bootstrap\b|\bMelxis context recovery\b|\bmelxis hive\b|project-orientation|Called plugin:melxis:melxis|Called plugin:melxis:memory|Called plugin:melxis:task/i.test(
     text,
   );
 }
@@ -103,10 +117,40 @@ export function shouldInjectBootstrap({ prompt, entries }) {
   return { inject: true };
 }
 
+export function shouldInjectCheckpointRecovery({ entries }) {
+  if (!Array.isArray(entries) || entries.length === 0) return { inject: false, reason: 'empty' };
+  if (!hasTaskLikeContext(entries)) return { inject: false, reason: 'no-task-context' };
+
+  const operationCheckpoints = extractOperationCheckpoints(entries);
+  const lastOperationCheckpointIndex = operationCheckpoints.reduce(
+    (max, checkpoint) => Math.max(max, checkpoint.entryIndex ?? -1),
+    -1,
+  );
+  const lastCaptureAnchorIndex = findLastCaptureAnchorIndex(entries);
+  const lastProgressIndex = findLastSubstantialProgressIndex(entries);
+  const hasDecisionSignal = lastCaptureAnchorIndex >= 0;
+  const hasProgressSignal = lastProgressIndex >= 0;
+  const hasOperationCheckpoint = operationCheckpoints.length >= 1;
+
+  if (!hasOperationCheckpoint && !hasProgressSignal && !hasDecisionSignal) {
+    return { inject: false, reason: 'no-checkpoint-signal' };
+  }
+
+  const anchorIndex = Math.max(lastOperationCheckpointIndex, lastCaptureAnchorIndex, lastProgressIndex);
+  if (hasTaskUpdateAfterIndex(entries, anchorIndex)) {
+    return { inject: false, reason: 'task-update-after-checkpoint' };
+  }
+
+  return { inject: true };
+}
+
 export function buildAdditionalContext({ prompt, entries }) {
   const blocks = [];
   const bootstrap = shouldInjectBootstrap({ prompt, entries });
   if (bootstrap.inject) blocks.push(BOOTSTRAP_TEMPLATE);
+
+  const checkpoint = shouldInjectCheckpointRecovery({ entries });
+  if (checkpoint.inject) blocks.push(CHECKPOINT_RECOVERY_TEMPLATE);
 
   const directive = shouldInjectDirective({ prompt, entries });
   if (directive.inject) blocks.push(DIRECTIVE_TEMPLATE(directive.matched.join(', ')));
