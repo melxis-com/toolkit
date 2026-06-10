@@ -61,7 +61,7 @@ Before starting any code change, search for related design decisions:
 
 ### Session End — Safety Net Sweep
 
-In-turn capture (Trigger Rule 2) is the primary save path. Session End is a fallback sweep — not the main consolidation phase. Most saves should already have happened in-turn.
+In-turn capture (saving in the same turn the insight appears) is the primary save path. Session End is a fallback sweep — not the main consolidation phase. Most saves should already have happened in-turn.
 
 1. Verify in-turn captures landed — if any decision was articulated during the session but no `mel_patch` / `mel_update` / `mel_create` followed, search for an existing matching mel and refine it first; create only if the insight is genuinely new
 2. For potential near-duplicate mels created during the session, propose `mel_link_create(reason: "candidate_duplicate")` to flag for later review — do NOT auto-merge (merge is destructive without bi-temporal soft delete)
@@ -94,7 +94,7 @@ mel_search(ids: ["<id1>", "<id2>", ...])                     # batch hydrate a k
 
 Search by keyword and optionally filter by tags. Omit `hive_ids` to search across every hive accessible to you (useful at session start). Without a query, returns mels with pagination.
 
-**Batch hydration via `ids`** — When you have a known ID list (e.g. a task's `related_mel_ids`), pass `ids: [...]` to resolve all summaries in one round-trip. This is the canonical fix for the Rule 6 N+1 pattern. `mel_get` remains the right tool when you need the full content of a single mel; `mel_search(ids: ...)` is for bulk summary lookup. Up to 50 IDs per call.
+**Batch hydration via `ids`** — When you have a known ID list (e.g. a task's `related_mel_ids`), pass `ids: [...]` to resolve all summaries in one round-trip. This is the canonical fix for the per-id N+1 lookup pattern at task start. `mel_get` remains the right tool when you need the full content of a single mel; `mel_search(ids: ...)` is for bulk summary lookup. Up to 50 IDs per call.
 
 ### Get mel details
 
@@ -194,8 +194,10 @@ Use only the evidence needed to trust the insight (usually 1-3 bullets). Move ne
 ### After Creating a Mel — Propose Links
 
 1. `mel_search` with related keywords to find connection candidates
-2. If relevant mels are found, propose links to the user
-3. `mel_link_create` to connect approved links
+2. Create links for connections you can justify in one sentence (the `reason` field) — under the `auto` write policy call `mel_link_create` directly; under `smart`/`confirm`, propose first
+3. Skip links you cannot articulate a reason for — a weak link is worse than no link
+
+The memory graph grows through links (hub formation). When a mel collects many links, recurs in searches, or 3+ mels point at the same theme, flag it to the user as a **Map of Content (MOC) candidate**: sharpen the hub mel's name and summary to describe the theme it organizes — the map itself stays in the links, not in the content (MOCs are built dynamically from `mel_link_create` edges, never as static index mels).
 
 ### Update vs Patch
 
@@ -207,9 +209,9 @@ Reach for `mel_update` only when:
 
 ### Active Draft Refinement
 
-When a draft mel was created earlier in the same session and the conversation continues to refine it (positive signals: "OK", "採用", "確定", "let's go with"; agreed design choices), `mel_patch` immediately on each confirmation. Do not batch refinements until Session End — that defeats in-turn capture (Trigger Rule 2) and loses turn-by-turn context.
+When a draft mel was created earlier in the same session and the conversation continues to refine it (positive signals: "OK", "採用", "確定", "let's go with"; agreed design choices), `mel_patch` immediately on each confirmation. Do not batch refinements until Session End — that defeats in-turn capture and loses turn-by-turn context.
 
-This applies even to mels you created within the current session — not only to mels surfaced by an earlier `mel_search`. The Retroactive evolution trigger (Rule 1) covers both cases.
+This applies even to mels you created within the current session — not only to mels surfaced by an earlier `mel_search`. The retroactive-evolution trigger covers both cases: recall is a refinement trigger, not read-only.
 
 ### Link mels
 
@@ -222,6 +224,8 @@ mel_link_create(
 ```
 
 Connect related decisions and learnings to build a memory graph.
+
+Standard link-reason vocabulary (one per link): `supersedes` / `refines` / `contradicts` / `part-of` / `uses` / `extracted-from-task`. A free-text sentence explaining the connection is also fine — the vocabulary keeps evolution traceable.
 
 ### Delete a mel
 

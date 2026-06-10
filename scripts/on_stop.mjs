@@ -19,22 +19,14 @@
 //     (c) dynamic G1 quote so the prompt is grounded in the current turn.
 //
 // Always honors stop_hook_active to avoid infinite loops.
-import {
-  readStdinJson,
-  readTranscriptTail,
-  logError,
-} from './lib/melxis-hook.mjs';
+// NOTE: checkpoint/closure evaluation moved to on_user_prompt_submit.mjs
+// (next-turn recovery). This hook is intentionally a no-op placeholder: it
+// stays registered so re-adding Stop-time logic later does not change
+// hooks.json (Codex re-trusts hooks on definition-hash change).
+import { readStdinJson, logError } from './lib/melxis-hook.mjs';
 
 try {
-  const input = readStdinJson();
-  if (input.stop_hook_active) {
-    process.exit(0);
-  }
-
-  const lines = readTranscriptTail(input.transcript_path, 200);
-  if (!lines.length) {
-    process.exit(0);
-  }
+  readStdinJson();
 } catch (err) {
   logError('stop', err);
 }

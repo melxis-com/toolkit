@@ -280,3 +280,157 @@ test('main hook emits bootstrap JSON for cleared-context prompt', () => {
   assert.match(output.hookSpecificOutput.additionalContext, /hive_search\(query: "<inferred project name>"\)/);
   assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /task_create/);
 });
+
+// --- Boundary-aware bootstrap (fixed tail-window anti-pattern fix) ---
+
+const boundaryEntry = (title) => ({ type: 'hook_success', content: [`## ${title}\n\nRecover...`] });
+const bootstrapNagEntry = () => ({
+  type: 'hook_additional_context',
+  content: ['[melxis] Recent transcript context does not show Melxis context recovery.'],
+});
+const checkpointNagEntry = () => ({
+  type: 'hook_additional_context',
+  content: ['[melxis] Recent transcript suggests task-like progress may not be reflected in Melxis yet.'],
+});
+
+test('shouldInjectBootstrap: injects when a session boundary has no recovery after it', () => {
+  const result = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [boundaryEntry('Melxis Session Resumed')],
+  });
+  assert.equal(result.inject, true);
+  assert.equal(result.reason, 'boundary-without-recovery');
+});
+
+test('shouldInjectBootstrap: silent when recovery happened after the boundary', () => {
+  const result = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [
+      boundaryEntry('Melxis Post-Compaction Recovery'),
+      toolUseEntry('mcp__plugin_melxis_melxis__mel_search', { tags: ['project-orientation'] }),
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'recovered-after-boundary');
+});
+
+test('shouldInjectBootstrap: recovery from BEFORE the boundary does not count (false-suppress fix)', () => {
+  const result = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [
+      toolUseEntry('mcp__plugin_melxis_melxis__mel_search', { tags: ['project-orientation'] }),
+      boundaryEntry('Melxis Session Resumed'),
+    ],
+  });
+  assert.equal(result.inject, true);
+  assert.equal(result.reason, 'boundary-without-recovery');
+});
+
+test('shouldInjectBootstrap: fires only once per boundary (habituation guard)', () => {
+  const result = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [boundaryEntry('Melxis Session Bootstrap'), bootstrapNagEntry()],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'nagged-after-boundary');
+});
+
+test('shouldInjectBootstrap: write tools count as Melxis context (false-fire fix)', () => {
+  const result = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [toolUseEntry('mcp__plugin_melxis_melxis__mel_create', { name: 'x' })],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'context-present');
+});
+
+test('shouldInjectBootstrap: without boundary, still capped at one nag per tail window', () => {
+  const result = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [bootstrapNagEntry()],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'already-nagged');
+});
+
+test('shouldInjectCheckpointRecovery: fires only once per checkpoint anchor', () => {
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('assistant', 'implemented the task current state refresh and tested it'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "checkpoint"' }),
+      checkpointNagEntry(),
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'nagged-after-checkpoint');
+});
+
+test('shouldInjectBootstrap: marker text inside tool traffic does not fabricate a boundary', () => {
+  // Reading the toolkit's own source files puts marker strings into
+  // tool_result entries; those must not count as boundaries or prior nags.
+  const result = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [
+      toolUseEntry('mcp__plugin_melxis_melxis__mel_search', { tags: ['project-orientation'] }),
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_x',
+              content: 'const STARTUP_BLOCK = `## Melxis Session Bootstrap ...`',
+            },
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'context-present');
+});
+
+test('shouldInjectBootstrap: nag text inside tool traffic does not fake a prior nag', () => {
+  const result = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_y',
+              content: 'does not show Melxis context recovery — quoted from source',
+            },
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(result.inject, true);
+  assert.equal(result.reason, 'no-context');
+});
+
+test('shouldInjectBootstrap: marker text in assistant prose does not count (hookOnly scan)', () => {
+  // Quoting the templates in conversation (common while developing the
+  // toolkit) must neither fabricate a boundary nor fake a prior nag.
+  const fakeBoundary = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [
+      toolUseEntry('mcp__plugin_melxis_melxis__mel_search', { tags: ['project-orientation'] }),
+      textEntry('assistant', 'The startup block is titled "Melxis Session Bootstrap".'),
+    ],
+  });
+  assert.equal(fakeBoundary.inject, false);
+  assert.equal(fakeBoundary.reason, 'context-present');
+
+  const fakeNag = shouldInjectBootstrap({
+    prompt: 'please continue where we left off',
+    entries: [
+      textEntry('assistant', 'It injects "does not show Melxis context recovery" as a reminder.'),
+    ],
+  });
+  assert.equal(fakeNag.inject, true);
+  assert.equal(fakeNag.reason, 'no-context');
+});

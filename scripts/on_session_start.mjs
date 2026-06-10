@@ -11,39 +11,24 @@
 // standard auth).
 import { readStdinJson, emitText, logError } from './lib/melxis-hook.mjs';
 
-const RULES_BLOCK = `
+// Compact pointer replacing the former inline 13-rule block (~5.5KB). The
+// full canonical rules now live in the melxis-memory / melxis-task SKILL.md
+// bodies (progressive disclosure: descriptions stay resident, bodies load on
+// demand) — per Claude Code / Codex official guidance that hooks carry only
+// dynamic context while durable rules belong to skills and server
+// instructions. Only the irreducible reflexes are kept inline so they
+// survive even when no skill is consulted.
+const RULES_POINTER_BLOCK = `
 
-## Memory Operating Rules
+## Memory Operating Rules (pointer)
 
-Capture at semantic moments. Consolidate when semantic events fire (refinement, contradiction, hub formation, task closure). Session End is a fallback sweep, not a primary phase.
-
-**Trigger rules**
-1. **Retroactive evolution** — After \`mel_search\` surfaces existing mels, OR when a draft mel created earlier in the same session is being refined by the conversation, evaluate whether the conversation refines them. If yes, prefer targeted \`mel_patch\` calls (text-level edits, one per localized change) over creating near-duplicates or batching refinements until Session End. Reach for \`mel_update\` only when name / summary / tags need to change, or when content is restructured beyond targeted replacement.
-2. **In-moment capture** — When the conversation surfaces (whether stated by the user or discovered by the agent during investigation) a decision, root cause, insight, preference, or feedback, propose save in that same turn. Do not wait for Stop or Session End. Triggers include both **positive** ("採用した", "決めた", "確定", "let's go with", "we'll use", "settled on", "OK", "yes exactly", "perfect", "今後は", "I prefer", "please always") and **negative** ("原因は", "the bug was", "root cause", "stop doing", "no not that", "やめて") signals. Corrections are easy to notice; confirmations and quiet preferences are easier to miss — watch for them. Apply two judgement criteria: **Recurrence likelihood** (will this come up again across sessions?) and **Inferability** (could a future agent reconstruct this from code or git alone?). Save when likely-to-recur AND non-inferable. Refinements to same-session drafts follow this rule too — \`mel_patch\` in the same turn, not at Session End. **Meta-signal**: when the agent itself recommends "this should be documented in [ADR / README / runbook / wiki / commit msg / ...]", recurrence × inferability has already been judged terminal — propose save immediately rather than externalize the knowledge to a non-mel surface.
-3. **Hub formation** — Immediately after \`mel_create\`, search for related mels and propose \`mel_link_create\` with a short reason. The memory graph grows through links.
-4. **Non-destructive supersession** — If new information contradicts an existing mel, do NOT modify it (neither \`mel_patch\` nor \`mel_update\`). Create a new mel and link with reason \`supersedes\`. Refinement → patch / update; contradiction → supersedes.
-5. **MOC candidate** — When a mel collects many links, recurs in searches, or 3+ mels point to the same theme, flag the hub mel to the user as a Map of Content (MOC) candidate. The hub is named, summarized, and lists the mels it organizes.
-6. **Task start (recover context)** — When \`task_update\` sets status to \`in_progress\`, recall context before acting: \`mel_search\` the task topic, then **batch-hydrate related mels in one call**. If you loaded the task via \`task_get\` (returns resolved \`related_mels\`), use \`mel_search(ids: related_mels.map(m => m.id))\`; if via \`task_search\` (raw \`related_mel_ids\`), use \`mel_search(ids: related_mel_ids)\` directly. Either way, do not call \`mel_get\` per id. Use \`mel_get\` only for the specific mels whose full content (not just summary) you need to act on. The next agent should resume from loaded context, not from a cold reading.
-7. **Task closure feedback** — When the user signals work completion (e.g. "shipped", "pushed", "done", "完了", "できた") or \`task_update\` is called with status \`completed\`/\`cancelled\`:
-   - Propose \`task_update\` to \`completed\` if not already set.
-   - Evaluate the conversation log, task trace, tool activity, and related mels.
-   - **Existing memory refinement** — prefer \`mel_patch\` / \`mel_update\` when feedback corrects, narrows, or sharpens an existing mel.
-   - **Insight extraction (WHY)** — search existing mels first. If the feedback is genuinely new and durable (a design decision, root cause, or anti-pattern), use \`mel_create\` (tag e.g. \`design-decision\`, \`bug-fix\`, \`anti-pattern\`) and link with reason \`extracted-from-task\`.
-   - **Procedure extraction (HOW)** — search existing convention/procedure mels first. If the feedback is a genuinely new reusable procedural pattern (a recipe / convention worth applying to similar future tasks), use \`mel_create\` (tag \`convention\`) and link with reason \`extracted-from-task\`.
-   - **Granularity audit** — if the completed/cancelled task turned out to contain multiple independently resumable intentions, different owners/surfaces, or separate completion criteria, capture the split pattern as a reusable procedure or anti-pattern.
-8. **Bidirectional link** — Whenever \`task_create\` or \`task_update\` adds \`related_mel_ids\`, also propose \`mel_link_create\` between those mels (reason: \`part-of\`) so design context is dense in the mel graph, not only in the task. Symmetrically, when closure feedback updates or creates relevant memory, propose adding the relevant mel ID to the active task's \`related_mel_ids\` (read-modify-write — \`task_get\` returns resolved \`related_mels\`, so map back to ids via \`related_mels.map(m => m.id)\` before passing to \`task_update\`; arrays are replaced, not appended).
-
-**Quality rules**
-9. **Core insight** — A mel represents understanding, not events. Extract WHY, not WHAT. Lead with the insight; evidence is supporting context.
-10. **Atomicity** — 1 mel = 1 concept. If the target is composite, split into multiple mels and link them.
-11. **Evidence status** — User-reported observations are valuable but not automatically verified facts. If a mel or task description relies only on user report (dogfood results, trigger rates, client behavior, competitor behavior), state that in the summary/content/description and tag it \`user-reported\` + \`needs-verification\` where tags are available. Avoid saving causal hypotheses unless they are necessary to define a verification task; keep them clearly separated from facts and next actions. Promote claims later by \`mel_patch\` / \`mel_update\` or \`task_update\` after logs, transcripts, code, docs, or other evidence confirm them. User preferences and explicit decisions can be saved directly, but split out any external factual claims that need verification.
-12. **Brevity and stale-trace pruning** — Do not turn mels or tasks into conversation logs. Keep mels short and atomic: core insight first, only the minimum evidence needed to trust it. Keep parent task descriptions as compressed current state, not append-only history. Put independently resumable next actions into sub-tasks; remove or replace stale steps, old observations, and resolved blockers via \`task_update\`.
-13. **Vocabulary discipline**
-    - Tags: \`design-decision\` / \`bug-fix\` / \`convention\` / \`anti-pattern\` / \`user-preference\` / \`project-orientation\` / \`user-reported\` / \`needs-verification\` (extend only when none fit)
-    - Link reasons: \`supersedes\` / \`refines\` / \`contradicts\` / \`part-of\` / \`uses\` / \`extracted-from-task\` (one per link)
-
-Reads are encouraged proactively. Write behavior follows the active **Write policy** block below — do not assume an "ask first" default.
+Full rules live in the **melxis-memory** and **melxis-task** skills — consult them at semantic moments (saving or refining memory, linking, task start/closure, session end sweep). Judgment core (Recurrence × Inferability, push-not-pull) arrives with the Melxis MCP server instructions. Irreducible reflexes, valid even without loading the skills:
+- Prefer \`mel_patch\` / \`mel_update\` on existing mels over creating near-duplicates; save in the same turn the insight appears, not at session end. Recall is a refinement trigger too: if a recalled mel is sharpened or corrected by the current turn's findings, patch it now.
+- Contradiction → create a new mel + \`mel_link_create\` reason "supersedes"; never rewrite the contradicted mel.
+- After \`mel_create\`, search related mels and propose links. 1 mel = 1 concept — split composites.
+- User-reported observations get tags \`user-reported\` + \`needs-verification\`; hypotheses become verification tasks, not mel facts.
 `;
+
 
 const MCP_FAILURE_BLOCK = `
 ## MCP connection failures
@@ -76,8 +61,11 @@ function resolveWritePolicy() {
   const raw = process.env.MELXIS_WRITE_POLICY;
   if (raw === 'auto' || raw === 'smart' || raw === 'confirm') return raw;
   if (raw !== undefined && raw !== '') {
+    // Sanitize before logging: the value is user-controlled env input, so
+    // strip control characters and cap length to keep the log single-line.
+    const safe = String(raw).replace(/[^\x20-\x7E]/g, '?').slice(0, 32);
     process.stderr.write(
-      `melxis-hook[session-start]: unknown MELXIS_WRITE_POLICY "${raw}", falling back to "auto"\n`,
+      `melxis-hook[session-start]: unknown MELXIS_WRITE_POLICY "${safe}", falling back to "auto"\n`,
     );
   }
   return 'auto';
@@ -111,10 +99,8 @@ Melxis growing-memory is available via MCP. Restore cross-session context before
 2. Resolve the hive from agreement/confidence across those two result sets. If \`hive_search\` resolves a hive that the first \`mel_search\` did not return, call \`mel_search(hive_ids: ["<resolved hive id>"], tags: ["project-orientation"])\` to recover that hive's orientation entrypoint.
 3. If a hive is resolved, call \`task_search(hive_id: "<resolved hive id>", sort: "recency")\` without \`parent_task_id\` for recent-session handoff recovery. If both searches miss or candidates are ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context.
 4. Use the recovered context silently as the session brief. Routine Melxis bookkeeping stays silent; report MCP availability/auth/token/connection failures.
-5. If a handoff task exists and recent progress is not reflected in its description/status/related_mel_ids, call \`task_update\` to refresh the task as compressed current state before continuing.
-6. Keep the parent task as goal / why / Definition of Done. Create or update sub-tasks for independently resumable remaining work with separate completion criteria; do not create sub-tasks for ephemeral same-turn steps.
-7. If the user's first request implies non-trivial multi-step work (bug investigation, refactor, feature implementation, review-driven polish loop), anchor the work BEFORE substantive implementation: use \`task_update(status="in_progress")\` for an existing matching task, otherwise propose \`task_create\`. The task is the anchor for Rules 6 / 7 / 8 (start / closure / bidirectional).
-8. Skip task anchoring only for trivial one-shot edits (typo, single-line fix, pure read-only Q&A). Read-only Q&A still needs session context recovery; do not let the task-anchor skip become a permanent session-context skip. If skipped work later spans 3+ tool calls, crosses turn boundaries, or surfaces a root cause / decision that qualifies as a save trigger, update an existing matching task or create one retroactively.
+5. If a handoff task exists and recent progress is not reflected in it, refresh it via \`task_update\` (compressed current state, not append-only history; independently resumable remaining work becomes sub-tasks).
+6. If the first request implies non-trivial multi-step work, anchor it BEFORE substantive implementation: \`task_update(status="in_progress")\` on a matching task, else \`task_create\`. Trivial one-shot edits may skip the anchor — but if skipped work grows (3+ tool calls, crosses turns, or surfaces a decision/root cause), anchor retroactively. Never let the task-anchor skip become a session-context skip.
 
 IMPORTANT: This recovery is a hard precondition — execute step 1 before any other tool call or assistant text. If recovery returns no relevant context, proceed silently without announcing the miss.
 
@@ -123,24 +109,20 @@ Note: Melxis MCP tools may be deferred-loaded by your harness (schemas not pre-r
 
 const RESUME_BLOCK = `## Melxis Session Resumed
 
-Session resumed. Refresh memory state before continuing:
+Session resumed. IMPORTANT: refreshing memory state is a hard precondition — execute step 1 before any other tool call or assistant text. Context from before the resume may be stale or summarized away; only recovery performed now counts.
 
-1. Use the SessionStart atomic recovery flow: \`mel_search(tags: ["project-orientation"])\` + \`hive_search(query: "<inferred project name>")\`, then scoped orientation lookup and \`task_search(sort: "recency")\` if a hive is resolved.
+1. Run the atomic recovery flow: \`mel_search(tags: ["project-orientation"])\` + \`hive_search(query: "<inferred project name>")\`, then scoped orientation lookup and \`task_search(hive_id, sort: "recency")\` if a hive is resolved.
 2. Use the recovered handoff task and orientation context silently.
 3. If progress is not reflected in the active task, refresh its compressed current state with \`task_update\`; split independently resumable remaining work into sub-tasks instead of appending everything to the parent.
-
-Memory Operating Rules established at session start remain in effect.
 `;
 
 const COMPACT_BLOCK = `## Melxis Post-Compaction Recovery
 
-Context was just compacted; rules and state may have been dropped. Recover via Melxis:
+Context was just compacted; rules and state may have been dropped. IMPORTANT: recovery is a hard precondition — execute step 1 before any other tool call or assistant text. Recovery from before the compaction does not count; the summary may have dropped it.
 
-1. Use the SessionStart atomic recovery flow: \`mel_search(tags: ["project-orientation"])\` + \`hive_search(query: "<inferred project name>")\`, then scoped orientation lookup and \`task_search(sort: "recency")\` if a hive is resolved.
+1. Run the atomic recovery flow: \`mel_search(tags: ["project-orientation"])\` + \`hive_search(query: "<inferred project name>")\`, then scoped orientation lookup and \`task_search(hive_id, sort: "recency")\` if a hive is resolved.
 2. Use the recovered project/task/memory state silently.
 3. If compaction lost recent task progress, refresh the active task's compressed current state and sub-task structure before continuing.
-
-Memory Operating Rules (rules 1-13, including Task start context recall, Task closure → mel extraction with reason "extracted-from-task", bidirectional mel ⇌ task linking, evidence status, and stale-trace pruning) remain in effect; reload via \`mel_search\` if details are needed.
 `;
 
 const FALLBACK_BLOCK = `## Melxis Session Hook
@@ -153,14 +135,13 @@ try {
   const source = input.source ?? 'startup';
 
   if (source === 'startup' || source === 'clear') {
-    emitText(STARTUP_BLOCK + MCP_FAILURE_BLOCK + RULES_BLOCK + POLICY_BLOCK);
+    emitText(STARTUP_BLOCK + MCP_FAILURE_BLOCK + RULES_POINTER_BLOCK + POLICY_BLOCK);
   } else if (source === 'resume') {
-    emitText(RESUME_BLOCK + MCP_FAILURE_BLOCK + POLICY_BLOCK);
+    emitText(RESUME_BLOCK + MCP_FAILURE_BLOCK + RULES_POINTER_BLOCK + POLICY_BLOCK);
   } else if (source === 'compact') {
-    // Compaction event: prior summary already retained rule references.
-    // Emit a short re-anchor instead of doubling the instruction budget.
-    // Re-include POLICY_BLOCK because it was likely lost during compaction.
-    emitText(COMPACT_BLOCK + MCP_FAILURE_BLOCK + POLICY_BLOCK);
+    // Re-include the rules pointer and POLICY_BLOCK: both are cheap (~1KB)
+    // and likely lost during compaction.
+    emitText(COMPACT_BLOCK + MCP_FAILURE_BLOCK + RULES_POINTER_BLOCK + POLICY_BLOCK);
   } else {
     // Unrecognized source: fall through to a minimal anchor so the hook
     // never produces zero output silently. Log to stderr so harness drift

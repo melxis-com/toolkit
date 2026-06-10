@@ -166,6 +166,45 @@ export function hasToolCallMatchingAfterIndex(entries, pattern, index) {
   return hasToolCallMatching(entries.slice(start), pattern);
 }
 
+// Scans raw entries (stringified) for a text marker and returns the index of
+// the last entry containing it, or -1. Entry shapes vary across clients and
+// hook events (`hook_additional_context`, `hook_success`, message content
+// arrays), so a raw scan is more robust than extractText, which only walks
+// assistant/user message text.
+const HOOK_TYPE_RE = /"type"\s*:\s*"hook_/;
+
+export function findLastEntryIndexMatching(entries, pattern, options = {}) {
+  if (!Array.isArray(entries)) return -1;
+  const hookOnly = options.hookOnly === true;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    let raw;
+    if (entry && typeof entry === 'object') {
+      // hookOnly: hook emissions are recorded with a "hook_*" entry type
+      // (hook_success / hook_additional_context). Marker text inside tool
+      // traffic or assistant prose (e.g. quoting these templates while
+      // developing the toolkit) must not count as a boundary or prior nag.
+      // The type check also skips stringifying large non-hook entries.
+      if (hookOnly && typeof entry.type === 'string' && !entry.type.startsWith('hook_')) {
+        continue;
+      }
+      try {
+        raw = JSON.stringify(entry);
+      } catch {
+        continue;
+      }
+      if (hookOnly && typeof entry.type !== 'string' && !HOOK_TYPE_RE.test(raw)) continue;
+    } else if (typeof entry === 'string') {
+      raw = entry;
+      if (hookOnly && !HOOK_TYPE_RE.test(raw)) continue;
+    } else {
+      continue;
+    }
+    if (raw && pattern.test(raw)) return i;
+  }
+  return -1;
+}
+
 export function hasTaskRelatedMelUpdateAfterIndex(entries, index) {
   if (!Array.isArray(entries)) return false;
   const start = Math.max(0, index + 1);
