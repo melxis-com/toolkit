@@ -2,7 +2,11 @@
 
 **One mind. Many AIs. — shared memory and tasks for AI agents.**
 
-[Melxis](https://melxis.com) couples memory and tasks for AI agents. Save design decisions, bug analyses, and learnings as **mels** in **hives** (namespaces), and track multi-step work as **tasks**. Mels and Tasks feed each other — Tasks reference related Mels for context, completed Tasks return insights back to Mels, and the next agent picks up where the last one left off.
+[![Melxis — One mind. Many AIs.](assets/hero.png)](https://melxis.com)
+
+What you tell one AI becomes context for another AI and your team — the next agent picks up where the last one left off.
+
+[Melxis](https://melxis.com) keeps that context in **hives** — namespaces you can keep private or share with your team, so every member's agents draw on the same memory. Design decisions, bug analyses, and learnings live as **mels**, and multi-step work lives as **tasks**. The two feed each other — tasks reference related mels for context, and completed tasks return insights back to memory.
 
 ## Supported Platforms
 
@@ -39,9 +43,9 @@ Codex's plugin hooks integration is still an under-development feature, so setup
 
    This unlocks lifecycle hooks shipped by plugins. Codex will print a warning that the feature is under development; that is expected.
 
-4. **Approve the bundled hooks** — in the Codex TUI, open `/hooks` and approve `SessionStart`, `Stop`, and `TaskCompleted`. Codex blocks plugin hooks from running until you approve them once.
+4. **Approve the bundled hooks** — in the Codex TUI, open `/hooks` and approve `SessionStart`, `Stop`, and `TaskCompleted`. Codex blocks plugin hooks from running until you approve them once. Approval is tied to the hook definitions, so toolkit updates that change them require re-approval in `/hooks`.
 
-After these steps, `/clear`, resume, and compaction boundaries can reload Melxis guidance through the approved lifecycle hooks. If context is not restored after `/clear`, check both `/plugins` and `/hooks`.
+After these steps, `/clear`, resume, and compaction boundaries can reload Melxis guidance through the approved lifecycle hooks.
 
 ### Generic MCP
 
@@ -73,9 +77,7 @@ Start a fresh agent session and ask it to check Melxis memory, for example:
 Search my Melxis hives for project orientation.
 ```
 
-If the agent can call `hive_search`, `mel_search`, or `task_search` after OAuth, the MCP connection is working. If tools do not appear, restart the client session and confirm that the platform-specific install step above loaded the MCP config.
-
-If the agent reports that Melxis MCP tools are unavailable, or that a Melxis MCP call failed because of authentication, token, or connection errors, reconnect or sign in to Melxis MCP and ask the agent to retry the Melxis check. On Codex CLI, run `codex mcp login melxis`.
+If the agent can call `hive_search`, `mel_search`, or `task_search` after OAuth, the MCP connection is working. If anything fails, see [Troubleshooting](#troubleshooting).
 
 That's it. Depending on the client surface, Melxis can guide the agent to:
 
@@ -126,6 +128,10 @@ On Claude Code and Codex CLI, the toolkit ships hooks that surface Melxis at the
 
 Hook scripts emit prompts only — they do not call `mcp.melxis.com` directly. Authentication continues to flow through the standard MCP OAuth connection. Codex CLI uses the same `hooks/hooks.json` format and provides `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` env vars for OOTB compatibility, so the same hook scripts run on both platforms unchanged (gated behind the under-development `plugin_hooks` feature — see Install).
 
+### Hook runtime (Node.js)
+
+Hook scripts run on Node.js. The bundled `run-hook.sh` wrapper locates a runtime automatically — PATH first, then common version-manager shims (volta / asdf / mise / nodenv / fnm / nvm) and standard install locations — so hooks keep working even when the host invokes them with a minimal PATH (Codex does). If no runtime is found, hooks are skipped quietly with a one-line stderr notice instead of erroring. Set `MELXIS_NODE=/path/to/node` to point at a specific runtime.
+
 ### Write policy (`MELXIS_WRITE_POLICY`)
 
 The default behaviour for write tools (`mel_create` / `mel_update` / `mel_patch` / `mel_link_create` / `mel_delete` / `mel_link_delete` / `task_create` / `task_update` / `task_delete`) is **auto-save**: the agent calls write tools directly when the judgement criteria (Recurrence likelihood × Inferability gap) are met, without asking for per-write confirmation. Editorial control belongs to the user at recall time — review, patch, supersede, unlink, or delete memories through MCP tools or the web UI.
@@ -167,6 +173,15 @@ Melxis connects through OAuth-secured MCP and gives you control over when agents
 The production service runs on Google Cloud with primary infrastructure in `asia-northeast1` (Tokyo). See the [Privacy Policy](https://melxis.com/legal/privacy) and [Terms of Service](https://melxis.com/legal/terms) for data handling, subprocessors, retention, and legal requests. For security concerns or account-level access/export/deletion requests, contact `privacy@melxis.com`.
 
 For implementation-level details, see [SECURITY.md](SECURITY.md).
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| Melxis tools do not appear | Restart the client session and confirm the platform-specific install step loaded the MCP config (Codex: check `/plugins`). |
+| Authentication, token, or connection errors | Reconnect or sign in to Melxis MCP again, then retry. On Codex CLI, run `codex mcp login melxis`. |
+| Context is not restored after `/clear` / resume (Codex) | Check `/plugins` and `/hooks` — plugin hooks stay blocked until approved, and approval is tied to the hook definitions, so updates that change them require re-approval. |
+| Hooks do nothing, with a one-line `Node.js not found` notice on stderr | The hook runtime could not be located. Install Node.js, or set `MELXIS_NODE=/path/to/node` (see [Hook runtime](#hook-runtime-nodejs)). |
 
 ## License
 
