@@ -1,8 +1,6 @@
 # Melxis Toolkit
 
-**One mind. Many AIs. — shared memory and tasks for AI agents.**
-
-[![Melxis — One mind. Many AIs.](assets/hero.png)](https://melxis.com)
+[![Melxis — One mind. Many AIs. Collective intelligence for AI.](assets/hero.png)](https://melxis.com)
 
 What you tell one AI becomes context for another AI and your team — the next agent picks up where the last one left off.
 
