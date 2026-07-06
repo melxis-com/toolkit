@@ -11,7 +11,7 @@ Search prior knowledge when the user:
 - asks what is pending ("what's left", "残っているタスク")
 - starts a task that may intersect with existing knowledge
 
-Flow: `mel_search(tags=["project-orientation"])` + `hive_search(query="<inferred project name>")` → scoped orientation lookup if needed → `task_search(sort="recency")` when a hive is resolved → `mel_get` for one full mel only when needed. Infer the project name from local project context without exposing raw local details. If no relevant memory is found, proceed silently.
+Flow: `hive_search(query="<inferred project name>")` first (gives `own` / `writable` / `owner_account_id`; identify hives by id + `own`, never by name — names collide across accounts) → resolve the project's hive set (own anchor with `own: true`, plus shared hives with `own: false` as read-only context) and take your own account ids from the `own: true` rows → own-scoped `mel_search(query="<inferred project name>", tags=["project-orientation"], owner_account_ids=[<own account ids>])` for orientation → only if an own anchor resolved, `task_search(hive_id=<own anchor>, sort="recency")` (tasks are private to each account; no own anchor → shared-only mode, skip task recovery) → `mel_get` for one full mel only when needed. Working recall stays blended: leave `hive_ids` / `owner_account_ids` unset so own and shared knowledge rank together (shared hits carry `shared: true`, read-only). Infer the project name from local project context without exposing raw local details. If no relevant memory is found, proceed silently.
 
 If Melxis MCP tools are unavailable, or a Melxis MCP call fails because of authentication, token, or connection errors, tell the user explicitly. Do not silently continue as if memory or tasks were checked. Ask the user to reconnect or sign in to Melxis MCP, then retry the Melxis call after they confirm. On Codex CLI, suggest `codex mcp login melxis`.
 
@@ -36,9 +36,13 @@ Keep mels and tasks compact. A mel should be one durable insight with minimal ev
 
 When resuming or recovering work, update the active task before continuing if progress is not reflected in Melxis. Refresh `description` as compressed current state, update `status` / `priority` / `tags` / `related_mel_ids` when changed, and split independently resumable remaining work into sub-tasks instead of stuffing the parent description.
 
-## Project orientation — first mel in each hive
+## Project orientation — one current orientation mel per hive you own
 
-When creating a new hive, propose a `project-orientation` mel as the first entry — describes the hive's purpose, scope, what belongs / what doesn't, and tagging conventions. The hive's description should be one concise sentence (project name + purpose + scope hint). Future sessions surface the orientation mel via `mel_search` (omit `hive_ids` to search across all accessible hives), eliminating cold-start questions. When orientation changes materially, create a new mel and link with `mel_link_create(reason: "supersedes ...")` rather than overwriting.
+Every hive you own should carry exactly one current `project-orientation` mel — it describes the hive's purpose, scope, what belongs / what doesn't, and tagging conventions. Propose it as the first entry when creating a hive; backfill it when an existing own hive has none (once enough project context exists — do not fabricate on a cold start); consolidate with `supersedes` links when one hive has several. Never create or consolidate orientation mels in shared hives, and never merge across different hive ids just because names match. The hive's description should be one concise sentence (project name + purpose + scope hint). When orientation changes materially, create a new mel and link with `mel_link_create(reason: "supersedes ...")` rather than overwriting.
+
+## Writing across own and shared hives
+
+Writes only land in hives you own; shared hives are read-only and their tasks are not visible at all. To build on a shared mel, create your own mel in your own hive and link it to the shared one (`mel_link_create` reason `forked-from` or `refines`). Fork when you are actively building on a shared mel, not to hoard shared content — prefer referring in place. Shares can be revoked at any time (an access change, not a deletion of copies you already made): read past missing shared mels gracefully, and let a fork of something you were actively working on keep your in-progress work available — while respecting the owner's intent for anything confidential.
 
 ## Linking
 

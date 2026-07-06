@@ -4,7 +4,7 @@
 
 What you tell one AI becomes context for another AI and your team — the next agent picks up where the last one left off.
 
-[Melxis](https://melxis.com) keeps that context in **hives** — namespaces you can keep private or share with your team, so every member's agents draw on the same memory. Design decisions, bug analyses, and learnings live as **mels**, and multi-step work lives as **tasks**. The two feed each other — tasks reference related mels for context, and completed tasks return insights back to memory.
+[Melxis](https://melxis.com) keeps that context in **hives** — namespaces you can keep private or share with your team. Shared hives are read-only for everyone you invite: their agents recall your team's knowledge alongside their own, and build on it by forking mels into their own hives. Design decisions, bug analyses, and learnings live as **mels**; multi-step work lives as **tasks**, which stay private to each account. The two feed each other — tasks reference related mels for context, and completed tasks return insights back to memory.
 
 ## Supported Platforms
 
@@ -119,7 +119,7 @@ On Claude Code and Codex CLI, the toolkit ships hooks that surface Melxis at the
 
 | Hook | When it fires | What it does |
 |------|--------------|--------------|
-| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context with `mel_search(tags=["project-orientation"])`, `hive_search(query="<inferred project name>")`, scoped orientation lookup when needed, and `task_search(sort="recency")` after hive resolution; also injects the active **Write policy** block |
+| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context: own-scoped orientation `mel_search`, `hive_search` to resolve the project's hive set (own anchor + shared read-only), scoped orientation lookup when needed, and `task_search(sort="recency")` on the own anchor hive; also injects the active **Write policy** block |
 | Stop | end of each assistant response | Silent non-blocking safety check; routine checkpoint recovery is handled on the next prompt or session boundary |
 | TaskCompleted | a task is marked completed | Prompts learning extraction, task granularity audit, and link proposals |
 | PreCompact | before context compaction | Captures session state before compaction |
@@ -129,6 +129,18 @@ Hook scripts emit prompts only — they do not call `mcp.melxis.com` directly. A
 ### Hook runtime (Node.js)
 
 Hook scripts run on Node.js. The bundled `run-hook.sh` wrapper locates a runtime automatically — PATH first, then common version-manager shims (volta / asdf / mise / nodenv / fnm / nvm) and standard install locations — so hooks keep working even when the host invokes them with a minimal PATH (Codex does). If no runtime is found, hooks are skipped quietly with a one-line stderr notice instead of erroring. Set `MELXIS_NODE=/path/to/node` to point at a specific runtime.
+
+### Headless `codex exec` runs
+
+The hooks load from `~/.codex/config.toml`, so a non-interactive `codex exec` invocation inherits them like any interactive session — it will be prompted to recover context and anchor a task. That is the right behaviour for automation that *should* use project memory, but not for a one-shot subprocess that another tool spawns and parses (an independent reviewer, a schema-constrained extractor): there the SessionStart bootstrap is unwanted, and a `task_*` write it triggers can spend budget or perturb the run's output.
+
+For those hermetic runs, pass `--ignore-user-config`:
+
+```sh
+codex exec --ignore-user-config -s read-only "<prompt>"
+```
+
+This skips `config.toml` entirely — Melxis hooks, MCP, and any other plugins do not load — while authentication still resolves from `CODEX_HOME`, so the subscription is unaffected. Use it whenever a `codex exec` reviewer/automation should run clean rather than anchored to the caller's cross-session memory. (Only keep user config when the run genuinely depends on it, e.g. a custom model provider defined there.)
 
 ### Write policy (`MELXIS_WRITE_POLICY`)
 

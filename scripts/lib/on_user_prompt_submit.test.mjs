@@ -206,8 +206,15 @@ test('shouldInjectCheckpointRecovery: silent after task_update checkpoint', () =
 test('buildAdditionalContext: bootstrap only for non-work prompt', () => {
   const context = buildAdditionalContext({ prompt: '今日は良い天気ですか？', entries: [] });
   assert.match(context, /Recent transcript context does not show Melxis context recovery/);
-  assert.match(context, /mel_search\(tags: \["project-orientation"\]\)/);
-  assert.match(context, /hive_search\(query: "<inferred project name>"\)/);
+  // v3 multi-hive recovery: hive_search first (identity), then own-scoped orientation
+  // (query + tags + owner_account_ids), hive set = own anchor + shared read-only,
+  // task_search only when an own anchor resolves.
+  assert.match(context, /hive_search\(query: "<inferred project name>"\).{0,4}first/);
+  assert.match(context, /mel_search\(query: "<inferred project name>", tags: \["project-orientation"\], owner_account_ids/);
+  assert.match(context, /identify hives by id \+ `own`, never by name/);
+  assert.match(context, /Only if an own anchor hive is resolved, call `task_search/);
+  assert.match(context, /shared-only mode and skip task recovery/);
+  assert.match(context, /Tasks are private to each account/i);
   assert.doesNotMatch(context, /<cwd basename>|<repo name>|raw filesystem paths/i);
   assert.doesNotMatch(context, /task_create/);
 });
@@ -218,8 +225,9 @@ test('buildAdditionalContext: combines bootstrap and task directive for multi-st
     entries: [],
   });
   assert.match(context, /Recent transcript context does not show Melxis context recovery/);
-  assert.match(context, /mel_search\(tags: \["project-orientation"\]\)/);
-  assert.match(context, /hive_search\(query: "<inferred project name>"\)/);
+  assert.match(context, /hive_search\(query: "<inferred project name>"\).{0,4}first/);
+  assert.match(context, /mel_search\(query: "<inferred project name>", tags: \["project-orientation"\], owner_account_ids/);
+  assert.match(context, /Only if an own anchor hive is resolved, call `task_search/);
   assert.match(context, /task_update/);
   assert.match(context, /task_create/);
   assert.match(context, /Read-only Q&A still needs session context recovery/);

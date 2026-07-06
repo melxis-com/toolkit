@@ -9,7 +9,7 @@ when_to_use: Use when the user plans multi-step work ("let's split into steps", 
 ## Core Concepts
 
 - **Hive**: A namespace for grouping related mels and tasks (e.g., per project, per topic).
-- **Task**: A unit of shared intent — an agent's work plan that persists across sessions. Tasks enable coordination between agents and humans. Unlike mels (declarative knowledge), tasks are imperative (what to do).
+- **Task**: A unit of shared intent — an agent's work plan that persists across sessions and is shared across the agents and humans in your account (tasks stay within one account). Unlike mels (declarative knowledge), tasks are imperative (what to do).
 
 > For saving decisions, learnings, and building a knowledge graph, see the **melxis-memory** skill.
 > Use `related_mel_ids` when creating tasks to connect them to relevant knowledge.
@@ -46,7 +46,7 @@ Routine Melxis bookkeeping stays silent; see AGENTS.md §Routine Melxis Bookkeep
 
 ## Resume / Checkpoint Recovery
 
-When resuming work or recovering after a missed checkpoint, do more than find the task. If progress is not reflected in Melxis, call `task_patch` or `task_update` before substantive work:
+Handoff recovery always targets a hive you own — tasks are private to each account, so shared hives have nothing to recover from. When resuming work or recovering after a missed checkpoint, do more than find the task. If progress is not reflected in Melxis, call `task_patch` or `task_update` before substantive work:
 
 - Refresh the parent task `description` as compressed current state, not append-only history. Prefer `task_patch` for localized section replacement; if it fails due to stale text, call `task_get` and fall back to `task_update(description=...)` with a freshly compressed state.
 - Update `status`, `priority`, `tags`, and `related_mel_ids` when the current state changed.
@@ -59,6 +59,8 @@ Routine updates stay silent unless they affect the user-facing answer or require
 ---
 
 ## Search Tasks
+
+Tasks are private to each account — shares carry mels only. A hive shared with you exposes its mels, never its tasks (the server answers shared-hive task lookups with not-found or a guidance error), so always search, anchor, and hand off tasks in a hive you own.
 
 ```
 task_search(hive_id: "<hive-id>")
@@ -91,7 +93,7 @@ Without a query or filters, returns all tasks ordered by priority then updated_a
 task_get(id: "<task-id>")
 ```
 
-Returns the full task including description, resolved `related_tasks` (each `{id, title, status, priority}`), resolved `related_mels` (each `{id, name}`), and — for root tasks — a `sub_tasks` array. Raw `related_*_ids` are not exposed by `task_get` — the resolved arrays preserve the caller's input order, and archived / cross-hive / deleted references are silently dropped (max 50 each). Use this when you need more than the search summary: to read description, inspect 1-hop relationships, or list sub-tasks under a parent. For full link metadata (direction / reason / confidence) on a specific mel, call `mel_get` on its id.
+Returns the full task including description, resolved `related_tasks` (each `{id, title, status, priority}`), resolved `related_mels` (each `{id, name}`), and — for root tasks — a `sub_tasks` array. Raw `related_*_ids` are not exposed by `task_get` — the resolved arrays preserve the caller's input order, and archived or deleted references are silently dropped, as are references into other hives (task resolution stays within the task's own hive even across your own hives — a narrower rule than account-level task privacy; max 50 each). Use this when you need more than the search summary: to read description, inspect 1-hop relationships, or list sub-tasks under a parent. For full link metadata (direction / reason / confidence) on a specific mel, call `mel_get` on its id.
 
 Note: `task_search` still returns raw `related_mel_ids` / `related_task_ids` on each row — only `task_get` resolves them.
 
