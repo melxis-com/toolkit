@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { hasActiveMelxisTask } from './melxis-hook.mjs';
 import {
@@ -206,14 +208,22 @@ test('shouldInjectCheckpointRecovery: silent after task_update checkpoint', () =
 test('buildAdditionalContext: bootstrap only for non-work prompt', () => {
   const context = buildAdditionalContext({ prompt: '今日は良い天気ですか？', entries: [] });
   assert.match(context, /Recent transcript context does not show Melxis context recovery/);
-  // v3 multi-hive recovery: hive_search first (identity), then own-scoped orientation
-  // (query + tags + owner_account_ids), hive set = own anchor + shared read-only,
-  // task_search only when an own anchor resolves.
+  // v3 multi-hive recovery: hive_search first (identity), then the anchor map scoped
+  // by hive id (an owner filter does not narrow anything when you own several hives),
+  // hive set = own anchor + shared read-only, task_search only when an own anchor
+  // resolves. The steps must match on_session_start.mjs — the two hooks are the same
+  // recovery flow reached by different triggers, and a divergence here means recall
+  // changes depending on which one fired.
   assert.match(context, /hive_search\(query: "<inferred project name>"\).{0,4}first/);
-  assert.match(context, /mel_search\(query: "<inferred project name>", tags: \["project-orientation"\], owner_account_ids/);
+  assert.match(context, /hive_context_get\(hive_id: "<own anchor hive id>"\)/);
+  assert.match(context, /sort: "recency", limit: 10/);
   assert.match(context, /identify hives by id \+ `own`, never by name/);
-  assert.match(context, /Only if an own anchor hive is resolved, call `task_search/);
-  assert.match(context, /shared-only mode and skip task recovery/);
+  // The gate has to cover hive_context_get and task_search together. Gating only
+  // one of them leaves a path where a user with no own anchor is told to make an
+  // own-hive-only read.
+  assert.match(context, /only if an own anchor hive is resolved — call `hive_context_get/);
+  assert.match(context, /followed by `task_search/);
+  assert.match(context, /shared-only mode and skip both `hive_context_get` and task recovery/);
   assert.match(context, /Tasks are private to each account/i);
   assert.doesNotMatch(context, /<cwd basename>|<repo name>|raw filesystem paths/i);
   assert.doesNotMatch(context, /task_create/);
@@ -226,8 +236,13 @@ test('buildAdditionalContext: combines bootstrap and task directive for multi-st
   });
   assert.match(context, /Recent transcript context does not show Melxis context recovery/);
   assert.match(context, /hive_search\(query: "<inferred project name>"\).{0,4}first/);
-  assert.match(context, /mel_search\(query: "<inferred project name>", tags: \["project-orientation"\], owner_account_ids/);
-  assert.match(context, /Only if an own anchor hive is resolved, call `task_search/);
+  assert.match(context, /hive_context_get\(hive_id: "<own anchor hive id>"\)/);
+  assert.match(context, /sort: "recency", limit: 10/);
+  // The gate has to cover hive_context_get and task_search together. Gating only
+  // one of them leaves a path where a user with no own anchor is told to make an
+  // own-hive-only read.
+  assert.match(context, /only if an own anchor hive is resolved — call `hive_context_get/);
+  assert.match(context, /followed by `task_search/);
   assert.match(context, /task_update/);
   assert.match(context, /task_create/);
   assert.match(context, /Read-only Q&A still needs session context recovery/);
@@ -441,4 +456,275 @@ test('shouldInjectBootstrap: marker text in assistant prose does not count (hook
   });
   assert.equal(fakeNag.inject, true);
   assert.equal(fakeNag.reason, 'no-context');
+});
+
+// Regression: an actively-working session used to re-arm the checkpoint
+// reminder on every turn. SUBSTANTIAL_PROGRESS_PATTERN matches ordinary words
+// ("implemented", "fixed", and their Japanese equivalents), so each new
+// assistant turn produced a
+// newer progress index and the `nag > anchor` suppression could never hold.
+// Observed 2026-07-26: the reminder fired on every single turn of a long
+// session (~14% of the Melxis token budget) while a task anchor was in place.
+test('shouldInjectCheckpointRecovery: bare progress after a nag does not re-arm', () => {
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('assistant', 'working the implementation task'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "checkpoint"' }),
+      checkpointNagEntry(),
+      textEntry('assistant', 'implemented the next piece and tested it'),
+      textEntry('assistant', 'fixed another thing and verified it'),
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'progress-only-no-rearm');
+});
+
+test('shouldInjectCheckpointRecovery: a genuine new checkpoint after a nag re-arms', () => {
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('assistant', 'working the implementation task'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "first"' }),
+      checkpointNagEntry(),
+      textEntry('assistant', 'implemented more'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "second"' }),
+    ],
+  });
+  assert.equal(result.inject, true);
+});
+
+test('shouldInjectCheckpointRecovery: nag budget caps repeats within one boundary', () => {
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      boundaryEntry('Melxis Session Bootstrap'),
+      textEntry('assistant', 'working through the implementation task'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "a"' }),
+      checkpointNagEntry(),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "b"' }),
+      checkpointNagEntry(),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "c"' }),
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'nag-budget-exhausted');
+});
+
+// The budget is per session boundary. Resetting across a boundary is the whole
+// point of this behaviour, so the transcript has to contain one. Without a
+// boundary entry, boundaryIndex stays -1, the reset path is never taken, and the
+// suite passes green even if the budget were changed to count all of history.
+test('shouldInjectCheckpointRecovery: nag budget resets across a session boundary', () => {
+  const spent = [
+    textEntry('assistant', 'working through the implementation task'),
+    toolUseEntry('functions.exec_command', { cmd: 'git commit -m "a"' }),
+    checkpointNagEntry(),
+    toolUseEntry('functions.exec_command', { cmd: 'git commit -m "b"' }),
+    checkpointNagEntry(),
+    toolUseEntry('functions.exec_command', { cmd: 'git commit -m "c"' }),
+  ];
+
+  // exhausted within the same boundary
+  assert.equal(
+    shouldInjectCheckpointRecovery({ entries: [boundaryEntry('Melxis Session Bootstrap'), ...spent] })
+      .reason,
+    'nag-budget-exhausted',
+  );
+
+  // fires again after a new boundary, even later in the same history
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      ...spent,
+      boundaryEntry('Melxis Session Resumed'),
+      textEntry('assistant', 'implemented the next chunk of the task'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "d"' }),
+    ],
+  });
+  assert.equal(result.inject, true);
+});
+
+test('shouldInjectCheckpointRecovery: budget counts only nags after the latest boundary', () => {
+  // nags from before the boundary do not count — counting them would suppress
+  // the very first reminder
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      checkpointNagEntry(),
+      checkpointNagEntry(),
+      boundaryEntry('Melxis Session Resumed'),
+      textEntry('assistant', 'implemented the task current state refresh'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "after"' }),
+    ],
+  });
+  assert.equal(result.inject, true);
+});
+
+// --- recovery flow parity between hooks -----------------------------------
+//
+// SessionStart and UserPromptSubmit are two triggers into the same recovery
+// flow, so when the steps drift, recall depends on which hook happened to fire.
+// That is not hypothetical: UserPromptSubmit was once left behind on the owner
+// filter, and an account owning several hives got back the map of every project.
+// The wording may differ between them; the shape of the calls may not.
+test('bootstrap: SessionStart and UserPromptSubmit prescribe the same recall steps', () => {
+  const here = new URL('.', import.meta.url).pathname;
+  const sessionStart = readFileSync(join(here, '..', 'on_session_start.mjs'), 'utf8');
+  const userPrompt = readFileSync(join(here, '..', 'on_user_prompt_submit.mjs'), 'utf8');
+
+  const REQUIRED = [
+    // map and rules are read together, in one call, from a given hive id
+    'hive_context_get(hive_id: "<own anchor hive id',
+    // handoff recovery is capped
+    'sort: "recency", limit: 10',
+    // with no own anchor, neither map/rules nor tasks are fetched — gating only
+    // one of them is what went wrong before
+    'skip both `hive_context_get` and task recovery',
+  ];
+
+  // on_session_start.mjs holds three near-identical blocks: STARTUP, RESUME and
+  // COMPACT. Matching against the whole file passes as long as any one of them
+  // contains the needle, so a single block left on older wording stays green —
+  // which is exactly how RESUME and COMPACT kept gating only task_search on the
+  // own anchor. Slice the blocks apart and check each one.
+  // The step text lives inside template literals, so backticks appear escaped as
+  // \` in the source. Writing that escape into every needle would be unreadable;
+  // strip it before comparing instead.
+  const unescape = (s) => s.replaceAll('\\`', '`');
+
+  const BLOCKS = ['STARTUP_BLOCK', 'RESUME_BLOCK', 'COMPACT_BLOCK'];
+  const blockBodies = BLOCKS.map((name) => {
+    const start = sessionStart.indexOf(`const ${name} = \``);
+    assert.ok(start >= 0, `on_session_start.mjs has no ${name}`);
+    const end = sessionStart.indexOf('\n`;', start);
+    assert.ok(end > start, `could not find the end of ${name}`);
+    return { name, body: unescape(sessionStart.slice(start, end)) };
+  });
+
+  const userPromptText = unescape(userPrompt);
+
+  for (const needle of REQUIRED) {
+    for (const { name, body } of blockBodies) {
+      assert.ok(body.includes(needle), `${name} in on_session_start.mjs is missing "${needle}"`);
+    }
+    assert.ok(
+      userPromptText.includes(needle),
+      `on_user_prompt_submit.mjs is missing "${needle}" — it has drifted from SessionStart`,
+    );
+  }
+
+  // Guard against the superseded steps coming back. Filtering by owner does not
+  // narrow anything once you own several hives — it returns the map of every
+  // project. Filtering by hive_ids was correct, but reading map and rules
+  // separately costs an extra round trip and leaves a path that proceeds without
+  // ever reading the rules.
+  const STALE = [
+    'tags: ["project-orientation"], owner_account_ids',
+    'tags: ["project-orientation"], hive_ids',
+  ];
+  for (const needle of STALE) {
+    assert.ok(!sessionStart.includes(needle), `on_session_start.mjs still carries the superseded step "${needle}"`);
+    assert.ok(!userPrompt.includes(needle), `on_user_prompt_submit.mjs still carries the superseded step "${needle}"`);
+  }
+});
+
+// hive_context_get reads own hives only, so a user whose own anchor did not
+// resolve must not be told to call it. Placing the condition after the call
+// means the model acts on the instruction it read first and meets the condition
+// afterwards. Merely containing "skip both ..." is not enough to catch that —
+// BOOTSTRAP_TEMPLATE was left in exactly that shape. Pin the condition ahead of
+// the call on all four paths.
+test('the own-anchor condition precedes the hive_context_get call', () => {
+  const here = new URL('.', import.meta.url).pathname;
+  const unescape = (s) => s.replaceAll('\\`', '`');
+  const GATE = /only if (step 2 resolved an own anchor hive|an own anchor hive is resolved)/i;
+
+  const sessionStart = unescape(readFileSync(join(here, '..', 'on_session_start.mjs'), 'utf8'));
+  const userPrompt = unescape(readFileSync(join(here, '..', 'on_user_prompt_submit.mjs'), 'utf8'));
+
+  const blocks = [
+    ...['STARTUP_BLOCK', 'RESUME_BLOCK', 'COMPACT_BLOCK'].map((name) => {
+      const start = sessionStart.indexOf(`const ${name} = \``);
+      return { name, body: sessionStart.slice(start, sessionStart.indexOf('\n`;', start)) };
+    }),
+    (() => {
+      const start = userPrompt.indexOf('const BOOTSTRAP_TEMPLATE = `');
+      return { name: 'BOOTSTRAP_TEMPLATE', body: userPrompt.slice(start, userPrompt.indexOf('\n`;', start)) };
+    })(),
+  ];
+
+  for (const { name, body } of blocks) {
+    const call = body.indexOf('hive_context_get');
+    assert.ok(call >= 0, `${name} does not instruct hive_context_get`);
+    const gate = body.search(GATE);
+    assert.ok(gate >= 0, `${name} has no own-anchor condition`);
+    assert.ok(gate < call, `${name}: the condition comes after the hive_context_get call`);
+  }
+});
+
+// Rules have two sides — read and follow them, and record what the user agrees
+// to — and only the second lived inside STARTUP_BLOCK. A session that began with
+// a resume therefore never received the cue to write, so a user stating a
+// standing agreement produced no rules_edit (observed 2026-07-27). The moment an
+// agreement is stated is not tied to session start, so the cue belongs in
+// RULES_POINTER_BLOCK, which the source appends on all four paths.
+test('the cue to write rules reaches the startup, resume and compact paths alike', () => {
+  const here = new URL('.', import.meta.url).pathname;
+  const sessionStart = readFileSync(join(here, '..', 'on_session_start.mjs'), 'utf8');
+
+  for (const source of ['startup', 'resume', 'compact', 'clear']) {
+    const { stdout: out } = spawnSync(process.execPath, [join(here, '..', 'on_session_start.mjs')], {
+      input: JSON.stringify({ source }),
+      encoding: 'utf8',
+    });
+    assert.match(out, /rules_edit/, `source=${source} output carries no cue to write rules`);
+    assert.match(out, /rules_patch/, `source=${source} output does not mention rules_patch`);
+  }
+
+  // the read-and-follow side reaches every path too (pinning what already held)
+  assert.ok(
+    (sessionStart.match(/hive rules/g) ?? []).length >= 3,
+    'the instruction to follow hive rules is not present in all three blocks',
+  );
+});
+
+// hive_context_get and rules_* fall outside the <entity>_<verb> shape. Under a
+// plugin-prefixed registration the trailing "melxis" catches them anyway, which
+// hides the gap, so pin detection on the bare-MCP names. Miss this and an agent
+// that recovered through hive_context_get alone reads as "never recovered" and
+// gets the bootstrap reminder again.
+test('hasMelxisContext: bare-MCP hive_context_get and rules_* count as recall', () => {
+  for (const toolName of [
+    'hive_context_get',
+    'rules_get',
+    'rules_edit',
+    'rules_patch',
+    'next_actions',
+    'mcp__plugin_melxis_melxis__hive_context_get',
+    'mcp__melxis__rules_edit',
+    // mel_* / hive_* stay distinctive enough to match even when the server is
+    // aliased to something other than melxis
+    'mcp__memory__mel_search',
+  ]) {
+    assert.ok(
+      hasMelxisContext([toolUseEntry(toolName, {})]),
+      `${toolName} was not detected as a Melxis tool`,
+    );
+  }
+});
+
+// A false positive costs the whole recovery, not one extra reminder: once
+// hasMelxisContext returns true, shouldInjectBootstrap suppresses itself and the
+// session starts work without restoring context — the failure this hook exists
+// to prevent. task_*, rules_* and next_actions are ordinary words other servers
+// also use, so pin that a tool without the melxis marker is not counted.
+test('hasMelxisContext: similarly named tools from other MCP servers are not counted', () => {
+  for (const toolName of [
+    'mcp__linear__next_actions',
+    'mcp__eslint__rules_get',
+    'mcp__github__task_get',
+    'mcp__jira__task_search',
+  ]) {
+    assert.equal(
+      hasMelxisContext([toolUseEntry(toolName, {})]),
+      false,
+      `${toolName} was wrongly detected as a Melxis tool`,
+    );
+  }
 });

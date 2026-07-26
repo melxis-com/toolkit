@@ -205,13 +205,18 @@ export function findLastEntryIndexMatching(entries, pattern, options = {}) {
   return -1;
 }
 
-export function hasTaskRelatedMelUpdateAfterIndex(entries, index) {
-  if (!Array.isArray(entries)) return false;
+// How many entries after `index` match `pattern`. Shares the scan rules of
+// findLastEntryIndexMatching (including hookOnly) so a caller can budget how
+// often the same reminder has already fired within a window.
+export function countEntriesMatchingAfterIndex(entries, pattern, index, options = {}) {
+  if (!Array.isArray(entries)) return 0;
   const start = Math.max(0, index + 1);
+  let count = 0;
   for (let i = start; i < entries.length; i++) {
-    if (entryHasTaskRelatedMelUpdate(entries[i])) return true;
+    const slice = entries.slice(i, i + 1);
+    if (findLastEntryIndexMatching(slice, pattern, options) === 0) count++;
   }
-  return false;
+  return count;
 }
 
 export function hasTaskUpdateAfterIndex(entries, index) {
@@ -304,25 +309,11 @@ function entryHasTaskRelatedMelUpdate(entry) {
   return false;
 }
 
-// Locate the most recent transcript entry that anchors a task-closure event —
-// either a closure text signal ("shipped" / "完了" / etc.) or a task_update
-// tool call transitioning to completed/cancelled. Returns -1 if neither is
-// present. Used to scope "did the agent persist closure feedback?" to writes
-// that happened AFTER the closure event, not anywhere in the transcript tail.
-export function findLastClosureAnchorIndex(entries) {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
-    if (entryTextMatchesPattern(entry, PATTERNS.closure)) return i;
-    if (entryHasTaskClosureToolUse(entry)) return i;
-  }
-  return -1;
-}
-
 // Locate the most recent transcript entry that anchors a capture event —
 // any decision, insight, preference, or feedback signal in user/assistant text.
-// Symmetric to findLastClosureAnchorIndex: used to scope "did the agent save
-// after the latest capture signal?" so that an earlier-in-session save does
-// not suppress the reminder when a fresh signal arrives.
+// Used to scope "did the agent save after the latest capture signal?" so that
+// an earlier-in-session save does not suppress the reminder when a fresh
+// signal arrives.
 export function findLastCaptureAnchorIndex(entries) {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
@@ -376,10 +367,6 @@ export function hasTaskLikeContext(entries) {
   return /\b(task|plan|todo|checkpoint|milestone|implementation|fix|bug|review|refactor|investigation)\b|タスク|計画|実装|修正|調査|レビュー|リファクタ/i.test(
     text,
   );
-}
-
-export function hasSubstantialProgressSignal(entries) {
-  return findLastSubstantialProgressIndex(entries) >= 0;
 }
 
 const SUBSTANTIAL_PROGRESS_PATTERN =
@@ -466,12 +453,14 @@ function findTaskTransitions(entry) {
 // `pattern.test(line)` inside a loop never carries lastIndex state.
 export const PATTERNS = {
   // decision pattern covers positive intent signals: decisions, confirmations,
-  // and forward-looking preferences ("I prefer X", "今後は", "yes exactly").
+  // and forward-looking preferences ("I prefer X", "yes exactly", and the
+  // Japanese equivalents the pattern below also matches).
   // These are easy to miss at the agent layer and worth capturing as mels.
   decision:
     /(decided to|chose to|will use|migrating to|switching to|採用した|決めた|決定した|確定|変更した|let's go with|we'll use|settled on|yes exactly|perfect|今後は|I prefer|please always)/i,
   // insight pattern covers root-cause analysis and corrective feedback
-  // ("stop doing X", "no not that", "やめて") — both reshape future behavior.
+  // ("stop doing X", "no not that", and its Japanese equivalent) — both
+  // reshape future behavior.
   insight:
     /(root cause|caused by|was caused|原因は|原因が判明|the bug was|refactor(ed|ing)|リファクタ|stop doing|no not that|やめて)/i,
   closure: /(shipped|pushed|landed|merged|done with|完了|できた|終わった|finished|ship it)/i,

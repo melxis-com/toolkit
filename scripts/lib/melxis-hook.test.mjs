@@ -7,12 +7,10 @@ import { join, resolve } from 'node:path';
 
 import {
   extractOperationCheckpoints,
+  countEntriesMatchingAfterIndex,
   findLastCaptureAnchorIndex,
-  findLastClosureAnchorIndex,
   findLastSubstantialProgressIndex,
-  hasSubstantialProgressSignal,
   hasTaskLikeContext,
-  hasTaskRelatedMelUpdateAfterIndex,
   hasTaskUpdateAfterIndex,
   hasToolCallMatchingAfterIndex,
   PATTERNS,
@@ -127,46 +125,6 @@ test('task-like context can come from an active Melxis task or task wording', ()
   assert.equal(hasTaskLikeContext([textEntry('user', 'what is the weather')]), false);
 });
 
-test('substantial progress signal detects progress text and latest index', () => {
-  const entries = [
-    textEntry('assistant', 'starting'),
-    textEntry('assistant', 'implemented the hook behavior and tested it'),
-  ];
-
-  assert.equal(hasSubstantialProgressSignal(entries), true);
-  assert.equal(findLastSubstantialProgressIndex(entries), 1);
-});
-
-test('hasTaskRelatedMelUpdateAfterIndex requires related_mel_ids update', () => {
-  const entries = [
-    toolUseEntry('mcp__melxis__.mel_create', { name: 'extracted insight' }),
-    toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'completed' }),
-  ];
-
-  assert.equal(hasTaskRelatedMelUpdateAfterIndex(entries, 0), false);
-});
-
-test('hasTaskRelatedMelUpdateAfterIndex detects task related_mel_ids backlink', () => {
-  const entries = [
-    toolUseEntry('mcp__melxis__.mel_create', { name: 'extracted insight' }),
-    toolUseEntry('mcp__melxis__.task_update', { id: 't1', related_mel_ids: ['m1'] }),
-  ];
-
-  assert.equal(hasTaskRelatedMelUpdateAfterIndex(entries, 0), true);
-});
-
-test('hasTaskRelatedMelUpdateAfterIndex can include the anchor entry via index - 1', () => {
-  const entries = [
-    toolUseEntry('mcp__melxis__.task_update', {
-      id: 't1',
-      status: 'completed',
-      related_mel_ids: ['m1'],
-    }),
-  ];
-
-  assert.equal(hasTaskRelatedMelUpdateAfterIndex(entries, -1), true);
-});
-
 // --- PATTERNS coverage for preference / correction signals ----------------
 
 test('PATTERNS.decision matches preference signals', () => {
@@ -180,64 +138,6 @@ test('PATTERNS.insight matches correction signals', () => {
   assert.match('stop doing that please', PATTERNS.insight);
   assert.match('no not that one', PATTERNS.insight);
   assert.match('やめてほしい', PATTERNS.insight);
-});
-
-// --- findLastClosureAnchorIndex -------------------------------------------
-
-test('findLastClosureAnchorIndex returns -1 when no closure signal exists', () => {
-  const entries = [textEntry('user', 'how are you'), textEntry('assistant', 'fine')];
-  assert.equal(findLastClosureAnchorIndex(entries), -1);
-});
-
-test('findLastClosureAnchorIndex picks up closure text in assistant message', () => {
-  const entries = [
-    textEntry('user', 'please ship it'),
-    textEntry('assistant', 'commit + push 完了しました'),
-  ];
-  assert.equal(findLastClosureAnchorIndex(entries), 1);
-});
-
-test('findLastClosureAnchorIndex detects task_update tool call with completed status', () => {
-  const entries = [
-    textEntry('assistant', 'starting work'),
-    toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'completed' }),
-  ];
-  assert.equal(findLastClosureAnchorIndex(entries), 1);
-});
-
-test('findLastClosureAnchorIndex ignores task_update without closure status', () => {
-  const entries = [toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'in_progress' })];
-  assert.equal(findLastClosureAnchorIndex(entries), -1);
-});
-
-test('findLastClosureAnchorIndex returns latest of multiple closure signals', () => {
-  const entries = [
-    textEntry('assistant', 'finished part one'),
-    textEntry('assistant', 'unrelated'),
-    toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'completed' }),
-  ];
-  assert.equal(findLastClosureAnchorIndex(entries), 2);
-});
-
-test('closure gating: mel write before closure does not suppress reminder', () => {
-  const entries = [
-    toolUseEntry('mcp__melxis__.mel_create', { name: 'bug-fix' }),
-    textEntry('assistant', 'extensive review-driven additions'),
-    textEntry('assistant', 'commit + push 完了'),
-  ];
-  const anchor = findLastClosureAnchorIndex(entries);
-  assert.equal(anchor, 2);
-  assert.equal(hasToolCallMatchingAfterIndex(entries, MEL_WRITE_TOOL, anchor), false);
-});
-
-test('closure gating: mel write after closure suppresses reminder', () => {
-  const entries = [
-    toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'completed' }),
-    toolUseEntry('mcp__melxis__.mel_create', { name: 'extracted insight' }),
-  ];
-  const anchor = findLastClosureAnchorIndex(entries);
-  assert.equal(anchor, 0);
-  assert.equal(hasToolCallMatchingAfterIndex(entries, MEL_WRITE_TOOL, anchor), true);
 });
 
 // --- findLastCaptureAnchorIndex (symmetric to closure) --------------------
@@ -294,4 +194,62 @@ test('capture gating: save after signal suppresses reminder', () => {
   const anchor = findLastCaptureAnchorIndex(entries);
   assert.equal(anchor, 0);
   assert.equal(hasToolCallMatchingAfterIndex(entries, MELXIS_WRITE_TOOL, anchor), true);
+});
+
+// --- countEntriesMatchingAfterIndex ---------------------------------------
+//
+// Source of the nag budget count. Its edge cases (index=-1, empty array, an
+// index at the end, a non-array) were only ever exercised through the caller's
+// integration tests, so a broken contract stayed invisible as long as the
+// expectations in on_user_prompt_submit happened to still line up.
+
+const RE = /needle/;
+const hookEntry = (text) => ({ type: 'hook_success', content: [text] });
+
+test('countEntriesMatchingAfterIndex: index=-1 scans every entry', () => {
+  const entries = [hookEntry('needle a'), hookEntry('other'), hookEntry('needle b')];
+  assert.equal(countEntriesMatchingAfterIndex(entries, RE, -1, { hookOnly: true }), 2);
+});
+
+test('countEntriesMatchingAfterIndex: entries at or before the index are not counted', () => {
+  const entries = [hookEntry('needle a'), hookEntry('needle b'), hookEntry('needle c')];
+  assert.equal(countEntriesMatchingAfterIndex(entries, RE, 0, { hookOnly: true }), 2);
+  assert.equal(countEntriesMatchingAfterIndex(entries, RE, 1, { hookOnly: true }), 1);
+});
+
+test('countEntriesMatchingAfterIndex: a trailing or out-of-range index yields 0', () => {
+  const entries = [hookEntry('needle a'), hookEntry('needle b')];
+  assert.equal(countEntriesMatchingAfterIndex(entries, RE, entries.length - 1, { hookOnly: true }), 0);
+  assert.equal(countEntriesMatchingAfterIndex(entries, RE, 99, { hookOnly: true }), 0);
+});
+
+test('countEntriesMatchingAfterIndex: empty and non-array inputs yield 0 without throwing', () => {
+  assert.equal(countEntriesMatchingAfterIndex([], RE, -1), 0);
+  assert.equal(countEntriesMatchingAfterIndex(null, RE, -1), 0);
+  assert.equal(countEntriesMatchingAfterIndex(undefined, RE, -1), 0);
+  assert.equal(countEntriesMatchingAfterIndex('not an array', RE, -1), 0);
+});
+
+test('countEntriesMatchingAfterIndex: hookOnly counts hook-emitted entries only', () => {
+  const entries = [
+    hookEntry('needle in a hook'),
+    { message: { role: 'assistant', content: 'needle in assistant prose' } },
+  ];
+  assert.equal(countEntriesMatchingAfterIndex(entries, RE, -1, { hookOnly: true }), 1);
+});
+
+// findLastSubstantialProgressIndex is live: on_user_prompt_submit.mjs uses it to
+// compute armIndex. Dropping the boolean variant hasSubstantialProgressSignal as
+// dead code also took out the coverage for this function, which shared the same
+// test block — restore it on its own.
+test('findLastSubstantialProgressIndex: returns the latest index carrying progress text', () => {
+  const entries = [
+    textEntry('assistant', 'starting'),
+    textEntry('assistant', 'implemented the hook behavior and tested it'),
+  ];
+  assert.equal(findLastSubstantialProgressIndex(entries), 1);
+});
+
+test('findLastSubstantialProgressIndex: returns -1 when there is no progress', () => {
+  assert.equal(findLastSubstantialProgressIndex([textEntry('assistant', 'starting')]), -1);
 });

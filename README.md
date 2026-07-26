@@ -6,6 +6,8 @@ What you tell one AI becomes context for another AI and your team — the next a
 
 [Melxis](https://melxis.com) keeps that context in **hives** — namespaces you can keep private or share with your team. Shared hives are read-only for everyone you invite: their agents recall your team's knowledge alongside their own, and build on it by forking mels into their own hives. Design decisions, bug analyses, and learnings live as **mels**; multi-step work lives as **tasks**, which stay private to each account. The two feed each other — tasks reference related mels for context, and completed tasks return insights back to memory.
 
+A hive also carries **rules**: the standing agreements for how you want work done in it. Where mels record what is true, rules record what to do. Say it once — "always run the checks before committing here", "never touch production from this project" — and every later session reads it back before it starts, in whichever AI client you happen to be using.
+
 ## Supported Platforms
 
 Until Melxis is published to the official Anthropic / Codex marketplaces, installation is via direct GitHub reference. Choose your platform below.
@@ -83,6 +85,7 @@ That's it. Depending on the client surface, Melxis can guide the agent to:
 - **Check existing knowledge** before implementing changes
 - **Save design decisions** and learnings as they come up
 - **Track tasks** and hand off unfinished work across sessions
+- **Follow the rules you set for a hive** — say how you want work done there once, and later sessions read it back before they start
 
 ## Updating
 
@@ -98,13 +101,15 @@ For github-referenced installs, Claude Code requires refreshing the marketplace 
 
 Different install surfaces provide different levels of automation:
 
-| Surface | MCP tools | Skills / rules | Lifecycle hooks |
-|---------|-----------|----------------|-----------------|
-| Claude Code plugin | Yes | Yes | Yes |
-| Codex CLI | Yes | Skills + Hooks | Yes (`plugin_hooks`) |
+| Surface | MCP tools | Bundled guidance | Lifecycle hooks |
+|---------|-----------|------------------|-----------------|
+| Claude Code plugin | Yes | Skills | Yes |
+| Codex CLI | Yes | Skills + `AGENTS.md` | Yes (`plugin_hooks`) |
 | Generic MCP | Yes | MCP `instructions` | No |
 
-MCP-only installs can search, create, update, link, and delete mels/tasks. They rely on MCP instructions and the model's use of atomic Melxis searches for recall; they do not run local lifecycle hooks.
+MCP-only installs can search, create, update, link, and delete mels/tasks, and read and write a hive's rules. They rely on MCP instructions and the model's use of atomic Melxis searches for recall; they do not run local lifecycle hooks.
+
+A hive's **rules** are not part of this table — they live in Melxis, not in the install, so they reach every surface above and follow you between clients.
 
 ## Skills
 
@@ -119,7 +124,7 @@ On Claude Code and Codex CLI, the toolkit ships hooks that surface Melxis at the
 
 | Hook | When it fires | What it does |
 |------|--------------|--------------|
-| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context: own-scoped orientation `mel_search`, `hive_search` to resolve the project's hive set (own anchor + shared read-only), scoped orientation lookup when needed, and `task_search(sort="recency")` on the own anchor hive; also injects the active **Write policy** block |
+| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context: `hive_search` to resolve the project's hive set (own anchor + shared read-only), `hive_context_get` to read that hive's map and rules in one call, and `task_search(sort="recency")` on the own anchor hive; also injects the active **Write policy** block |
 | Stop | end of each assistant response | Silent non-blocking safety check; routine checkpoint recovery is handled on the next prompt or session boundary |
 | TaskCompleted | a task is marked completed | Prompts learning extraction, task granularity audit, and link proposals |
 | PreCompact | before context compaction | Captures session state before compaction |
@@ -178,6 +183,7 @@ Melxis connects through OAuth-secured MCP and gives you control over when agents
 - **Inspectable plugin.** The Claude Code plugin is plain text / Node ESM. Hook entrypoints are in [`scripts/`](scripts/) and hook registration is in [`hooks/hooks.json`](hooks/hooks.json).
 - **Prompt-only local hooks.** Claude Code hooks add guidance to the agent at session boundaries; they do not make direct network calls to Melxis or third parties.
 - **Configurable writes.** Set `MELXIS_WRITE_POLICY=confirm` for Claude Code, or add an explicit write-policy instruction for Codex. Use `confirm` to require explicit confirmation before every write, or `smart` to ask on borderline cases.
+- **Rules come from you, not from what an agent read.** A hive's rules are recorded only from what you tell the agent directly. Text it merely reads — a document, a web page, another tool's output — stays data, however imperative it sounds, so a stray "always do X" inside some file cannot quietly become a standing instruction for every future session. Rules exist only in hives you own; a shared hive never hands you its owner's rules.
 - **Review and correction.** Use MCP tools or the web UI to patch, supersede, unlink, or delete stored mels and tasks.
 
 The production service runs on Google Cloud with primary infrastructure in `asia-northeast1` (Tokyo). See the [Privacy Policy](https://melxis.com/legal/privacy) and [Terms of Service](https://melxis.com/legal/terms) for data handling, subprocessors, retention, and legal requests. For security concerns or account-level access/export/deletion requests, contact `privacy@melxis.com`.

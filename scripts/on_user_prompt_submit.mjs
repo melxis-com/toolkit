@@ -22,6 +22,7 @@ import {
   extractOperationCheckpoints,
   findLastCaptureAnchorIndex,
   findLastEntryIndexMatching,
+  countEntriesMatchingAfterIndex,
   findLastSubstantialProgressIndex,
   hasTaskLikeContext,
   hasTaskUpdateAfterIndex,
@@ -53,7 +54,7 @@ Skip task anchoring only if the work is genuinely trivial (typo, single-line fix
 
 const BOOTSTRAP_TEMPLATE = `[melxis] Recent transcript context does not show Melxis context recovery.
 
-Before answering the user's prompt, run the atomic Melxis recovery flow: call \`hive_search(query: "<inferred project name>")\` first — it gives \`own\` / \`owner_account_id\` per hive; identify hives by id + \`own\`, never by name (names collide across accounts). Infer the project name from local project context without exposing raw local details. Resolve the project's hive set — one own anchor hive (\`own: true\`) plus any shared hives (\`own: false\`, read-only mels) — and take your own account ids from the \`own: true\` results. Then call own-scoped \`mel_search(query: "<inferred project name>", tags: ["project-orientation"], owner_account_ids: [<own account ids>])\` for orientation. Only if an own anchor hive is resolved, call \`task_search(hive_id: "<own anchor hive id>", sort: "recency")\` without \`parent_task_id\` for handoff recovery — tasks are private to each account, so shared hives have none; with no own anchor, operate in shared-only mode and skip task recovery. If unresolved/ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered orientation, handoff task context, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks) as a compact session brief; keep working recall blended (leave \`hive_ids\` / \`owner_account_ids\` unset in \`mel_search\`).
+Before answering the user's prompt, run the atomic Melxis recovery flow: call \`hive_search(query: "<inferred project name>")\` first — it gives \`own\` / \`owner_account_id\` per hive; identify hives by id + \`own\`, never by name (names collide across accounts). Infer the project name from local project context without exposing raw local details. Resolve the project's hive set — one own anchor hive (\`own: true\`) plus any shared hives (\`own: false\`, read-only mels). Then — only if an own anchor hive is resolved — call \`hive_context_get(hive_id: "<own anchor hive id>")\` for one read returning the hive's map (what lives here and where) and its hive rules (the user's standing agreements for how to work in this hive; follow them for the rest of the session), followed by \`task_search(hive_id: "<own anchor hive id>", sort: "recency", limit: 10)\` without \`parent_task_id\` for handoff recovery. Both are own-hive only — tasks are private to each account, so shared hives have none; with no own anchor, operate in shared-only mode and skip both \`hive_context_get\` and task recovery. If unresolved/ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered map, hive rules, handoff task context, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks) as a compact session brief; keep working recall blended (leave \`hive_ids\` / \`owner_account_ids\` unset in \`mel_search\`).
 
 This is a lightweight recovery path for cleared/compacted context. Do not create or update memory from this reminder alone. Routine Melxis bookkeeping stays silent; report MCP availability/auth/token/connection failures.
 `;
@@ -100,8 +101,23 @@ export function shouldInjectDirective({ prompt, entries }) {
 // ("mcp__plugin_melxis_melxis__mel_create"). Write tools count as context —
 // an agent that just called mel_create has obviously recovered context, and
 // the previous read-only list caused false re-injection on write-heavy turns.
+//
+// Two classes of name, matched differently on purpose.
+//
+// `mel_*` / `hive_*` are distinctive enough to accept anywhere in the name, so
+// they keep matching even when the user aliases the MCP server to something
+// other than "melxis" (`mcp__memory__mel_search`).
+//
+// `task_*`, `rules_*` and `next_actions` are ordinary words that other servers
+// use — `mcp__linear__next_actions`, `mcp__eslint__rules_get` and
+// `mcp__github__task_get` all matched the earlier delimiter-based pattern.
+// A false positive here is the expensive direction: hasMelxisContext returns
+// true, shouldInjectBootstrap suppresses the reminder, and the session skips
+// the recovery this hook exists to trigger. A false negative only costs one
+// reminder, already capped per boundary. So the generic names are accepted
+// only with the "melxis" marker present or as an exact bare-MCP tool name.
 const MELXIS_TOOL_RE =
-  /(?:^|[._-])(?:mel|task|hive)_(?:search|get|create|update|patch|delete|link_create|link_delete)(?:[._-]|$)|melxis/i;
+  /melxis|(?:^|[._-])(?:mel_(?:search|get|create|update|patch|delete|link_create|link_delete)|hive_(?:search|create|update|context_get))(?:[._-]|$)|^(?:task_(?:search|get|create|update|patch|delete)|rules_(?:get|edit|patch)|next_actions)$/i;
 
 // Session boundary = our own SessionStart hook output recorded in the
 // transcript (entry types vary by client: hook_success / hook_additional_context).
@@ -113,6 +129,10 @@ const SESSION_BOUNDARY_RE =
 // Our own prior injections, used for fire-once-per-boundary dedupe.
 const BOOTSTRAP_NAG_RE = /does not show Melxis context recovery/;
 const CHECKPOINT_NAG_RE = /task-like progress may not be reflected in Melxis yet/;
+
+// Reminders per session boundary. Beyond this the same text stops informing and
+// starts costing budget (habituation).
+const CHECKPOINT_NAG_BUDGET = 2;
 
 // Marker scans are restricted to hook-emitted entries (hookOnly): the
 // literal marker strings also appear in tool_result / tool_use entries when
@@ -127,7 +147,7 @@ export function hasMelxisContext(entries) {
     return true;
   }
   const text = extractText(entries);
-  return /\bMelxis Session Bootstrap\b|\bmelxis hive\b|project-orientation|Called plugin:melxis:melxis|Called plugin:melxis:memory|Called plugin:melxis:task/i.test(
+  return /\bMelxis Session Bootstrap\b|\bmelxis hive\b|project-orientation|hive_context_get|Called plugin:melxis:melxis|Called plugin:melxis:memory|Called plugin:melxis:task/i.test(
     text,
   );
 }
@@ -183,17 +203,46 @@ export function shouldInjectCheckpointRecovery({ entries }) {
     return { inject: false, reason: 'no-checkpoint-signal' };
   }
 
-  const anchorIndex = Math.max(lastOperationCheckpointIndex, lastCaptureAnchorIndex, lastProgressIndex);
-  if (hasTaskUpdateAfterIndex(entries, anchorIndex)) {
+  // Arming (may the reminder fire at all) and re-arming (may it fire *again*
+  // after we already reminded) are deliberately different signals.
+  //
+  // Arming stays broad: bare progress prose is enough for the first reminder.
+  // Re-arming must not include bare progress. SUBSTANTIAL_PROGRESS_PATTERN
+  // matches ordinary words ("fixed", "added", and their Japanese equivalents),
+  // so in a session that
+  // is actively working, every turn produces a newer progress index — the
+  // suppression `nagIndex > anchorIndex` could then never hold and the reminder
+  // fired on every single turn (observed 2026-07-26: ~14% of the Melxis token
+  // budget spent re-asking for an anchor that was already in place).
+  //
+  // Only a genuine new checkpoint (an operation checkpoint, or a decision /
+  // capture anchor) re-arms. Progress alone does not.
+  const armIndex = Math.max(lastOperationCheckpointIndex, lastCaptureAnchorIndex, lastProgressIndex);
+  const rearmIndex = Math.max(lastOperationCheckpointIndex, lastCaptureAnchorIndex);
+
+  if (hasTaskUpdateAfterIndex(entries, armIndex)) {
     return { inject: false, reason: 'task-update-after-checkpoint' };
   }
 
-  // Fire once per checkpoint signal: if we already reminded after this anchor
-  // and no task_update followed, repeating the reminder every turn is noise.
-  // New progress creates a newer anchor and re-arms the reminder.
   const checkpointNagIndex = findLastEntryIndexMatching(entries, CHECKPOINT_NAG_RE, { hookOnly: true });
-  if (checkpointNagIndex > anchorIndex) {
-    return { inject: false, reason: 'nagged-after-checkpoint' };
+  if (checkpointNagIndex >= 0 && checkpointNagIndex > rearmIndex) {
+    // Distinguish the two suppressions in the debug trace: nothing new at all
+    // vs. new prose that reads like progress but is not a checkpoint. The
+    // latter is the case that used to re-arm on every turn.
+    return {
+      inject: false,
+      reason: armIndex > checkpointNagIndex ? 'progress-only-no-rearm' : 'nagged-after-checkpoint',
+    };
+  }
+
+  // Budget per session boundary. Even with real new checkpoints, repeating the
+  // same reminder past a couple of times is habituation, not guidance.
+  const boundaryIndex = findLastEntryIndexMatching(entries, SESSION_BOUNDARY_RE, { hookOnly: true });
+  const nagsSinceBoundary = countEntriesMatchingAfterIndex(entries, CHECKPOINT_NAG_RE, boundaryIndex, {
+    hookOnly: true,
+  });
+  if (nagsSinceBoundary >= CHECKPOINT_NAG_BUDGET) {
+    return { inject: false, reason: 'nag-budget-exhausted' };
   }
 
   return { inject: true };

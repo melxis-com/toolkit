@@ -1,0 +1,54 @@
+name: Test
+
+# Run the hook test suite on every push and pull request.
+#
+# The tests in scripts/lib/*.test.mjs are this repository's regression guard:
+# they pin the recall flow that the four session-start paths must agree on, the
+# tool-name matching that decides whether a session is nagged to recover
+# context, and the version agreement across the three client manifests. Until
+# now nothing ran them automatically — a release could ship a drifted manifest
+# or a silently disabled hook as long as no one ran `node --test` by hand.
+#
+# No dependencies to install: the suite is pure Node stdlib (node:test).
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          # The hooks run under whatever Node the user's client provides, so
+          # test on the oldest line still receiving security updates plus the
+          # current LTS rather than pinning a single version.
+          node-version: ${{ matrix.node }}
+
+      # The glob is left unquoted on purpose: `node --test` only learned to
+      # expand patterns itself in Node 22, so quoting it makes the command fail
+      # on older runtimes with "Could not find <literal pattern>". Letting the
+      # shell expand it passes the matched files as arguments and works on every
+      # version. The hooks run under whatever Node the user's client provides,
+      # so the test command has to be as portable as the hooks are.
+      - name: Run hook tests
+        run: node --test scripts/lib/*.test.mjs
+
+      - name: Syntax-check the hook entry points
+        run: |
+          for f in scripts/*.mjs; do node --check "$f"; done
+          sh -n scripts/run-hook.sh
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.x', '22.x']
