@@ -163,6 +163,14 @@ test('hasMelxisContext: true after visible plugin context text', () => {
   assert.equal(hasMelxisContext(entries), true);
 });
 
+// The retired control-surface tag is not evidence of recovery any more: nothing
+// in the flow writes it, so prose that happens to contain it is about something
+// else. Counting it suppresses the reminder and the session starts cold.
+test('hasMelxisContext: the retired orientation tag alone is not recovery', () => {
+  const entries = [textEntry('assistant', 'the old project-orientation convention is gone')];
+  assert.equal(hasMelxisContext(entries), false);
+});
+
 test('shouldInjectBootstrap: injects for normal prompt without Melxis context', () => {
   const result = shouldInjectBootstrap({ prompt: '今日は良い天気ですか？', entries: [] });
   assert.equal(result.inject, true);
@@ -202,14 +210,62 @@ test('shouldInjectCheckpointRecovery: silent after task_update checkpoint', () =
     ],
   });
   assert.equal(result.inject, false);
-  assert.equal(result.reason, 'task-update-after-checkpoint');
+  assert.equal(result.reason, 'task-write-after-checkpoint');
+});
+
+test('shouldInjectCheckpointRecovery: task_patch counts as reflecting progress', () => {
+  // The product steers agents toward task_patch for localized description
+  // edits. Counting only task_update made patch-first sessions look
+  // unreflected and the reminder fired right after the write.
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('assistant', 'implemented the task current state refresh and tested it'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "checkpoint"' }),
+      toolUseEntry('mcp__plugin_melxis_melxis__task_patch', { id: 't1', old_text: 'a', new_text: 'b' }),
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'task-write-after-checkpoint');
+});
+
+test('shouldInjectCheckpointRecovery: a write earlier in the same turn suppresses', () => {
+  // Real turns write first and narrate last. The write at entry 1 precedes the
+  // closing progress prose at entry 3, but both belong to the turn opened by
+  // the prompt at entry 0 — the progress IS reflected.
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('user', 'please continue the migration work'),
+      toolUseEntry('mcp__plugin_melxis_melxis__task_patch', { id: 't1', old_text: 'a', new_text: 'b' }),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "migration step"' }),
+      textEntry('assistant', 'implemented the migration step and committed it'),
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'task-write-after-checkpoint');
+});
+
+test('shouldInjectCheckpointRecovery: a write in a PREVIOUS turn does not suppress new progress', () => {
+  // The turn boundary must not reach back past the current prompt: progress
+  // made after a new prompt, with no write in that turn, is genuinely
+  // unreflected even though an older turn wrote the task.
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('user', 'start the migration'),
+      toolUseEntry('mcp__plugin_melxis_melxis__task_patch', { id: 't1', old_text: 'a', new_text: 'b' }),
+      textEntry('user', 'now do the next step'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "next step"' }),
+      textEntry('assistant', 'implemented the next step and committed it'),
+    ],
+  });
+  assert.equal(result.inject, true);
 });
 
 test('buildAdditionalContext: bootstrap only for non-work prompt', () => {
   const context = buildAdditionalContext({ prompt: '今日は良い天気ですか？', entries: [] });
   assert.match(context, /Recent transcript context does not show Melxis context recovery/);
-  // v3 multi-hive recovery: hive_search first (identity), then the anchor map scoped
-  // by hive id (an owner filter does not narrow anything when you own several hives),
+  // v3 multi-hive recovery: hive_search first (identity), then the anchor hive's
+  // guide scoped by hive id (an owner filter does not narrow anything when you own
+  // several hives),
   // hive set = own anchor + shared read-only, task_search only when an own anchor
   // resolves. The steps must match on_session_start.mjs — the two hooks are the same
   // recovery flow reached by different triggers, and a divergence here means recall
@@ -561,7 +617,7 @@ test('shouldInjectCheckpointRecovery: budget counts only nags after the latest b
 // SessionStart and UserPromptSubmit are two triggers into the same recovery
 // flow, so when the steps drift, recall depends on which hook happened to fire.
 // That is not hypothetical: UserPromptSubmit was once left behind on the owner
-// filter, and an account owning several hives got back the map of every project.
+// filter, and an account owning several hives got back every project's mels.
 // The wording may differ between them; the shape of the calls may not.
 test('bootstrap: SessionStart and UserPromptSubmit prescribe the same recall steps', () => {
   const here = new URL('.', import.meta.url).pathname;
@@ -569,11 +625,11 @@ test('bootstrap: SessionStart and UserPromptSubmit prescribe the same recall ste
   const userPrompt = readFileSync(join(here, '..', 'on_user_prompt_submit.mjs'), 'utf8');
 
   const REQUIRED = [
-    // map and rules are read together, in one call, from a given hive id
+    // the guide and the mels it points at come back in one call, from a given hive id
     'hive_context_get(hive_id: "<own anchor hive id',
     // handoff recovery is capped
     'sort: "recency", limit: 10',
-    // with no own anchor, neither map/rules nor tasks are fetched — gating only
+    // with no own anchor, neither the guide nor tasks are fetched — gating only
     // one of them is what went wrong before
     'skip both `hive_context_get` and task recovery',
   ];
@@ -610,10 +666,11 @@ test('bootstrap: SessionStart and UserPromptSubmit prescribe the same recall ste
   }
 
   // Guard against the superseded steps coming back. Filtering by owner does not
-  // narrow anything once you own several hives — it returns the map of every
-  // project. Filtering by hive_ids was correct, but reading map and rules
-  // separately costs an extra round trip and leaves a path that proceeds without
-  // ever reading the rules.
+  // narrow anything once you own several hives — it returns every project's
+  // mels. Filtering by hive_ids was correct, but fetching the hive's control
+  // surface with a tag search costs an extra round trip and leaves a path that
+  // proceeds without ever reading it. The control surface is now the guide, and
+  // `mel_search` cannot reach it at all.
   const STALE = [
     'tags: ["project-orientation"], owner_account_ids',
     'tags: ["project-orientation"], hive_ids',
@@ -658,13 +715,13 @@ test('the own-anchor condition precedes the hive_context_get call', () => {
   }
 });
 
-// Rules have two sides — read and follow them, and record what the user agrees
-// to — and only the second lived inside STARTUP_BLOCK. A session that began with
+// The guide has two sides — read and follow it, and record what the user states
+// — and only the second lived inside STARTUP_BLOCK. A session that began with
 // a resume therefore never received the cue to write, so a user stating a
-// standing agreement produced no rules_edit (observed 2026-07-27). The moment an
+// standing agreement produced no guide_edit (observed 2026-07-27). The moment an
 // agreement is stated is not tied to session start, so the cue belongs in
 // RULES_POINTER_BLOCK, which the source appends on all four paths.
-test('the cue to write rules reaches the startup, resume and compact paths alike', () => {
+test('the cue to write the guide reaches the startup, resume and compact paths alike', () => {
   const here = new URL('.', import.meta.url).pathname;
   const sessionStart = readFileSync(join(here, '..', 'on_session_start.mjs'), 'utf8');
 
@@ -673,31 +730,37 @@ test('the cue to write rules reaches the startup, resume and compact paths alike
       input: JSON.stringify({ source }),
       encoding: 'utf8',
     });
-    assert.match(out, /rules_edit/, `source=${source} output carries no cue to write rules`);
-    assert.match(out, /rules_patch/, `source=${source} output does not mention rules_patch`);
+    assert.match(out, /guide_edit/, `source=${source} output carries no cue to write the guide`);
+    assert.match(out, /guide_patch/, `source=${source} output does not mention guide_patch`);
+    // the superseded tool names must not survive anywhere in the injected text
+    assert.doesNotMatch(
+      out,
+      /\brules_(?:get|edit|patch)\b/,
+      `source=${source} output still names a tool the server no longer has`,
+    );
   }
 
   // the read-and-follow side reaches every path too (pinning what already held)
   assert.ok(
-    (sessionStart.match(/hive rules/g) ?? []).length >= 3,
-    'the instruction to follow hive rules is not present in all three blocks',
+    (sessionStart.match(/hive guide|hive's guide/g) ?? []).length >= 3,
+    'the instruction to follow the hive guide is not present in all three blocks',
   );
 });
 
-// hive_context_get and rules_* fall outside the <entity>_<verb> shape. Under a
+// hive_context_get and guide_* fall outside the <entity>_<verb> shape. Under a
 // plugin-prefixed registration the trailing "melxis" catches them anyway, which
 // hides the gap, so pin detection on the bare-MCP names. Miss this and an agent
 // that recovered through hive_context_get alone reads as "never recovered" and
 // gets the bootstrap reminder again.
-test('hasMelxisContext: bare-MCP hive_context_get and rules_* count as recall', () => {
+test('hasMelxisContext: bare-MCP hive_context_get and guide_* count as recall', () => {
   for (const toolName of [
     'hive_context_get',
-    'rules_get',
-    'rules_edit',
-    'rules_patch',
+    'guide_get',
+    'guide_edit',
+    'guide_patch',
     'next_actions',
     'mcp__plugin_melxis_melxis__hive_context_get',
-    'mcp__melxis__rules_edit',
+    'mcp__melxis__guide_edit',
     // mel_* / hive_* stay distinctive enough to match even when the server is
     // aliased to something other than melxis
     'mcp__memory__mel_search',
@@ -712,12 +775,15 @@ test('hasMelxisContext: bare-MCP hive_context_get and rules_* count as recall', 
 // A false positive costs the whole recovery, not one extra reminder: once
 // hasMelxisContext returns true, shouldInjectBootstrap suppresses itself and the
 // session starts work without restoring context — the failure this hook exists
-// to prevent. task_*, rules_* and next_actions are ordinary words other servers
-// also use, so pin that a tool without the melxis marker is not counted.
+// to prevent. task_*, guide_* and next_actions are ordinary words other servers
+// also use, so pin that a tool without the melxis marker is not counted. The
+// eslint case is kept verbatim: it is another server's tool name, not ours, and
+// renaming our surface does not make it ours.
 test('hasMelxisContext: similarly named tools from other MCP servers are not counted', () => {
   for (const toolName of [
     'mcp__linear__next_actions',
     'mcp__eslint__rules_get',
+    'mcp__docs__guide_get',
     'mcp__github__task_get',
     'mcp__jira__task_search',
   ]) {

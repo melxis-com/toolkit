@@ -219,13 +219,70 @@ export function countEntriesMatchingAfterIndex(entries, pattern, index, options 
   return count;
 }
 
-export function hasTaskUpdateAfterIndex(entries, index) {
+// Any Melxis task write counts as "progress reflected": task_update, but also
+// task_patch (the tool the product itself steers agents toward for localized
+// description edits) and task_create (anchoring new work IS reflecting it).
+// Counting only task_update made compliant patch-first sessions look
+// non-compliant, so the reminder fired right after the progress had been
+// written (observed dogfood 2026-07-30).
+export function hasTaskWriteAfterIndex(entries, index) {
   if (!Array.isArray(entries)) return false;
   const start = Math.max(0, index + 1);
   return hasToolCallMatching(
     entries.slice(start),
-    /(?:^|[._-])task_update(?:[._-]|$)/,
+    /(?:^|[._-])task_(?:update|patch|create)(?:[._-]|$)/,
   );
+}
+
+// Session boundary marker text, as emitted by the SessionStart hook blocks.
+// Canonical here so the turn walk below and the boundary/nag anchoring in
+// on_user_prompt_submit.mjs test the same set of block titles.
+export const SESSION_BOUNDARY_TEXT_RE =
+  /Melxis Session (?:Bootstrap|Resumed|Hook)|Melxis Post-Compaction Recovery/;
+
+// A turn starts at the user's prompt: the assistant prose, tool calls, and
+// tool results that follow all belong to one reply. Within a turn the task
+// write usually lands BEFORE the closing progress prose, so comparing writes
+// against the progress entry's index misreads every well-behaved turn as
+// "progress without a write". Callers compare against the turn start instead.
+// A prompt entry is user-role text without tool_result blocks (tool results
+// are also recorded under the user role); hook emissions are skipped. Returns
+// `index` itself when no prompt boundary is inside the window (fall back to
+// entry-order comparison).
+export function findTurnStartIndex(entries, index) {
+  if (!Array.isArray(entries) || index < 0) return index;
+  for (let i = Math.min(index, entries.length - 1); i >= 0; i--) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== 'object') continue;
+    if (typeof entry.type === 'string' && entry.type.startsWith('hook_')) {
+      // A session boundary (startup / resume / compaction block) ends the
+      // walk: without this stop, a window whose prompt entry sits before the
+      // boundary would resolve the "turn" into the previous session, and a
+      // stale task write there would suppress a genuinely unreflected turn.
+      let raw;
+      try {
+        raw = JSON.stringify(entry);
+      } catch {
+        continue;
+      }
+      if (raw && SESSION_BOUNDARY_TEXT_RE.test(raw)) return i;
+      continue;
+    }
+    const msg = entry.message;
+    if (!msg || msg.role !== 'user') continue;
+    const content = msg.content;
+    if (typeof content === 'string') return i;
+    if (Array.isArray(content)) {
+      const hasToolResult = content.some(
+        (c) => c && typeof c === 'object' && c.type === 'tool_result',
+      );
+      const hasText = content.some(
+        (c) => typeof c === 'string' || (c && typeof c === 'object' && c.type === 'text'),
+      );
+      if (hasText && !hasToolResult) return i;
+    }
+  }
+  return index;
 }
 
 // Check whether a single transcript entry's message text matches a pattern.
@@ -247,9 +304,11 @@ function entryTextMatchesPattern(entry, pattern) {
   return false;
 }
 
-// Detect a task_update tool call inside an entry whose input sets status to
-// completed or cancelled. Mirrors hasToolCallMatching's walk but additionally
-// inspects the tool input to confirm the lifecycle transition.
+// Detect a task write whose input sets status to completed or cancelled.
+// The closure signal is the status transition itself, not the tool that
+// carried it: task_patch accepts an optional status, so closing rides
+// either tool (same asymmetry class as the write matcher — a tool gaining a
+// capability must reach every regex that models the lifecycle).
 function entryHasTaskClosureToolUse(entry) {
   if (!entry || typeof entry !== 'object') return false;
   const stack = [entry];
@@ -263,7 +322,7 @@ function entryHasTaskClosureToolUse(entry) {
     }
 
     const name = current.name ?? current.tool_name ?? current.recipient_name ?? current.function?.name;
-    if (typeof name === 'string' && /(?:^|[._-])task_update(?:[._-]|$)/.test(name)) {
+    if (typeof name === 'string' && /(?:^|[._-])task_(?:update|patch)(?:[._-]|$)/.test(name)) {
       const input = parseMaybeJson(
         current.input ?? current.arguments ?? current.parameters ?? current.function?.arguments,
       );
@@ -360,7 +419,15 @@ export function extractOperationCheckpoints(entries) {
 export function hasTaskLikeContext(entries) {
   if (!Array.isArray(entries)) return false;
   if (hasActiveMelxisTask(entries)) return true;
-  if (hasToolCallMatching(entries, /(?:^|[._-])(?:task_search|task_get|task_create|task_update)(?:[._-]|$)/)) {
+  if (
+    hasToolCallMatching(
+      entries,
+      // task_patch included: a session editing a task description is task
+      // context as much as one updating it (same omission as the write
+      // matcher, observed dogfood 2026-07-30).
+      /(?:^|[._-])(?:task_search|task_get|task_create|task_update|task_patch)(?:[._-]|$)/,
+    )
+  ) {
     return true;
   }
   const text = extractText(entries);
@@ -406,10 +473,12 @@ export function hasActiveMelxisTask(entries) {
 }
 
 // Return a list of 'open' | 'close' transitions discovered inside a single
-// transcript entry. 'open' covers task_create and task_update(status=in_progress).
-// 'close' covers task_update with status completed/cancelled. Order within
-// an entry is best-effort (object key iteration order) but multi-transition
-// single entries are rare in practice.
+// transcript entry. 'open' covers task_create and a status=in_progress on
+// task_update / task_patch. 'close' covers status completed/cancelled on
+// either write tool — the transition is the signal, not the tool name
+// (task_patch carries an optional status). Order within an entry is
+// best-effort (object key iteration order) but multi-transition single
+// entries are rare in practice.
 function findTaskTransitions(entry) {
   const out = [];
   if (!entry || typeof entry !== 'object') return out;
@@ -424,8 +493,8 @@ function findTaskTransitions(entry) {
     const name = current.name ?? current.tool_name ?? current.recipient_name ?? current.function?.name;
     if (typeof name === 'string') {
       const isCreate = /(?:^|[._-])task_create(?:[._-]|$)/.test(name);
-      const isUpdate = /(?:^|[._-])task_update(?:[._-]|$)/.test(name);
-      if (isCreate || isUpdate) {
+      const isStatusWrite = /(?:^|[._-])task_(?:update|patch)(?:[._-]|$)/.test(name);
+      if (isCreate || isStatusWrite) {
         const input = parseMaybeJson(
           current.input ?? current.arguments ?? current.parameters ?? current.function?.arguments,
         );
@@ -434,7 +503,7 @@ function findTaskTransitions(entry) {
           // task_create may omit status (defaults to in_progress per Melxis convention)
           if (status === undefined || status === 'in_progress') out.push('open');
           else if (status === 'completed' || status === 'cancelled') out.push('close');
-        } else if (isUpdate) {
+        } else if (isStatusWrite) {
           if (status === 'in_progress') out.push('open');
           else if (status === 'completed' || status === 'cancelled') out.push('close');
         }

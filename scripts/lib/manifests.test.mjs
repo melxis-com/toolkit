@@ -1,26 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 
 const read = (rel) => JSON.parse(readFileSync(join(ROOT, rel), 'utf8'));
 
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.github']);
+const MANIFEST_NAMES = new Set(['plugin.json', 'marketplace.json']);
 
-/** Every plugin.json / marketplace.json the repo actually contains. */
-function findManifests(dir = ROOT) {
-  const out = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (SKIP_DIRS.has(entry.name)) continue;
-      out.push(...findManifests(join(dir, entry.name)));
-    } else if (entry.name === 'plugin.json' || entry.name === 'marketplace.json') {
-      out.push(relative(ROOT, join(dir, entry.name)));
-    }
-  }
-  return out;
+/**
+ * Every plugin.json / marketplace.json the repo actually ships, asked of git
+ * rather than of the filesystem.
+ *
+ * What a release ships is what git tracks. A plain directory walk answers a
+ * different question — everything sitting in the checkout — and a checkout also
+ * holds ignored local state: a dogfood install or a scratch worktree under
+ * `.claude/` carries its own copy of these manifests, and the walk would report
+ * them as uncovered clients. That failure says nothing about the release and
+ * cannot be fixed by editing the repo. An untracked manifest is invisible here
+ * for the same reason it is invisible to a release: it is not part of the repo
+ * until it is committed. Same source of truth as the comment-language check.
+ */
+function findManifests() {
+  return execFileSync('git', ['ls-files', '--', '*.json'], { cwd: ROOT, encoding: 'utf8' })
+    .split('\n')
+    .filter((path) => path && MANIFEST_NAMES.has(basename(path)));
 }
 
 // The version lives in three manifests because three clients read three
@@ -43,12 +49,12 @@ const VERSIONED = [
 // A hand-written list is exactly what went stale before: the release checklist
 // named two files the repo does not have and omitted .agents/plugins/
 // marketplace.json, which then sat a release behind while every check reported
-// agreement. Discover the manifests from disk and fail when one is not covered,
-// so adding a client cannot silently escape the version check.
-test('manifests: every manifest on disk is covered by the version check', () => {
-  const onDisk = findManifests().sort();
+// agreement. Discover the manifests from the repo and fail when one is not
+// covered, so adding a client cannot silently escape the version check.
+test('manifests: every manifest the repo tracks is covered by the version check', () => {
+  const tracked = findManifests().sort();
   const covered = new Set(VERSIONED.map((v) => v.path));
-  const uncovered = onDisk.filter((p) => !covered.has(p));
+  const uncovered = tracked.filter((p) => !covered.has(p));
 
   assert.deepEqual(
     uncovered,
@@ -58,7 +64,7 @@ test('manifests: every manifest on disk is covered by the version check', () => 
 
   // The reverse direction: a listed file that no longer exists reads as "no
   // violation" for that entry.
-  const missing = VERSIONED.map((v) => v.path).filter((p) => !onDisk.includes(p));
+  const missing = VERSIONED.map((v) => v.path).filter((p) => !tracked.includes(p));
   assert.deepEqual(missing, [], `VERSIONED lists file(s) the repo does not have: ${missing}`);
 });
 

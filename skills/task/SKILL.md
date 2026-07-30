@@ -1,7 +1,7 @@
 ---
 name: melxis-task
 description: Proactively tracks cross-session work plans — multi-step tasks, status, and handoffs between sessions and agents — as tasks in hives (namespaces). Default write policy is auto — agent saves directly when intent is clear. The toolkit env var MELXIS_WRITE_POLICY (auto / smart / confirm; default auto) overrides. Do NOT use for declarative knowledge (use melxis-memory), single-session todos, or purely local note files.
-when_to_use: Use when the user plans multi-step work ("let's split into steps", "タスクに分ける", "手順を作る"), asks what remains ("what's left", "残っているタスク", "pending work"), marks progress ("done with X", "Xできた", "completed"), hands off unfinished work at session end, or resumes prior multi-step work at session start. Flow — recall (task_search → task_get for detail), create (task_create with related_mel_ids to link design context), progress (task_update for status changes). Write behavior follows the active MELXIS_WRITE_POLICY block injected by the SessionStart hook.
+when_to_use: Use when the user plans multi-step work ("let's split into steps", "タスクに分ける", "手順を作る"), asks what remains ("what's left", "残っているタスク", "pending work"), marks progress ("done with X", "Xできた", "completed"), hands off unfinished work at session end, or resumes prior multi-step work at session start. Flow — recall (task_search → task_get for detail), create (task_create with related_mel_ids to link design context), progress (task_patch, optionally carrying a status; task_update for structural changes). Write behavior follows the active MELXIS_WRITE_POLICY block injected by the SessionStart hook.
 ---
 
 # Melxis Task
@@ -13,6 +13,7 @@ when_to_use: Use when the user plans multi-step work ("let's split into steps", 
 
 > For saving decisions, learnings, and building a knowledge graph, see the **melxis-memory** skill.
 > Use `related_mel_ids` when creating tasks to connect them to relevant knowledge.
+> The hive's **guide** — how to work in this hive — is read at session start via `hive_context_get` and applies to task work as well: inside that hive it takes precedence over your default habits. The guide outranks your defaults, never the user: an explicit instruction in the conversation always takes precedence over the guide.
 
 ## Quick Reference
 
@@ -22,8 +23,8 @@ when_to_use: Use when the user plans multi-step work ("let's split into steps", 
 | Search tasks | `task_search` | Find tasks by keyword, status, tags, or owner |
 | Get task | `task_get` | Retrieve full detail of a task (description, resolved `related_tasks` / `related_mels`, sub_tasks) |
 | Create task | `task_create` | Plan multi-step work across sessions |
-| Patch task | `task_patch` | Localized edits to task descriptions / handoff snapshots |
-| Update task | `task_update` | Update status, priority, links, or full task details |
+| Patch task | `task_patch` | Localized edits to task descriptions / handoff snapshots — an optional `status` can ride the same call |
+| Update task | `task_update` | Update title, priority, tags, links, a bare status, or the full description |
 | Delete task | `task_delete` | Remove completed or cancelled tasks |
 
 ---
@@ -55,6 +56,12 @@ Handoff recovery always targets a hive you own — tasks are private to each acc
 - Do not create sub-tasks for ephemeral same-turn steps.
 
 Routine updates stay silent unless they affect the user-facing answer or require a real user decision.
+
+---
+
+## Decisions in a sub-task reach the parent
+
+A sub-task keeps its own trace, and nothing travels upward on its own. When you record a decision in a sub-task that changes the parent's plan — its scope, its sequencing, or its definition of done — fix the affected part of the parent in the same turn (`task_patch` for the section, `task_update(description=...)` when the whole description no longer holds). Otherwise the parent keeps describing the plan that was replaced, and that is what the next session resumes from.
 
 ---
 
@@ -122,12 +129,12 @@ task_create(
 
 ```
 task_patch(id: "<task-id>", old_text: "Current: ...", new_text: "Current: ...")
+task_patch(id: "<task-id>", old_text: "Next: ...", new_text: "Outcome: ...", status: "completed")
 task_update(id: "<task-id>", status: "in_progress")
-task_update(id: "<task-id>", status: "completed")
 task_update(id: "<task-id>", priority: "urgent", tags: ["blocker"])
 ```
 
-Use `task_patch` for localized `description` edits, especially handoff snapshot / current-state sections. It is content-addressed like `mel_patch`: if `old_text` is missing or matches multiple places, the tool fails rather than appending ambiguous text. On failure, call `task_get`, rebuild the intended section from the latest description, and use `task_update(description=...)`.
+Use `task_patch` for localized `description` edits, especially handoff snapshot / current-state sections — and when the progress you just recorded also moves the status, pass `status` in the same call instead of following up with `task_update`. It is content-addressed like `mel_patch`: if `old_text` is missing or matches multiple places, the tool fails rather than appending ambiguous text. On failure, call `task_get`, rebuild the intended section from the latest description, and use `task_update(description=...)`. Closing a task fires the same follow-up either way: the closure signal is the status transition itself, not the tool that carried it.
 
 Status flow: `pending` → `in_progress` → `completed` / `cancelled`.
 

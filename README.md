@@ -4,9 +4,13 @@
 
 What you tell one AI becomes context for another AI and your team — the next agent picks up where the last one left off.
 
-[Melxis](https://melxis.com) keeps that context in **hives** — namespaces you can keep private or share with your team. Shared hives are read-only for everyone you invite: their agents recall your team's knowledge alongside their own, and build on it by forking mels into their own hives. Design decisions, bug analyses, and learnings live as **mels**; multi-step work lives as **tasks**, which stay private to each account. The two feed each other — tasks reference related mels for context, and completed tasks return insights back to memory.
+[Melxis](https://melxis.com) keeps that context in **hives** — namespaces you can keep private or share with your team. Shared hives are read-only for everyone you invite: their agents recall your team's knowledge alongside their own, and build on it by forking mels into their own hives. A hive holds three kinds of memory:
 
-A hive also carries **rules**: the standing agreements for how you want work done in it. Where mels record what is true, rules record what to do. Say it once — "always run the checks before committing here", "never touch production from this project" — and every later session reads it back before it starts, in whichever AI client you happen to be using.
+- **mels** are facts — design decisions, bug analyses, and learnings, with the reasoning behind them
+- **tasks** are history — multi-step work, what is done and what is left, private to each account
+- the **guide** is how — what belongs in this hive, where each kind of thing goes, and how to work in it
+
+Mels and tasks feed each other: tasks reference related mels for context, and completed tasks return insights back to memory. The guide is one short document per hive: inside that hive it takes precedence over an agent's default habits, while what you say in the moment always comes first — the last word stays yours. Say it once — "always run the checks before committing here", "never touch production from this project", "designs go here, incident write-ups go in the ops hive" — and every later session reads it back before it starts, in whichever AI client you happen to be using.
 
 ## Supported Platforms
 
@@ -74,10 +78,10 @@ When you first use a Melxis tool, you'll be prompted to authenticate via OAuth. 
 Start a fresh agent session and ask it to check Melxis memory, for example:
 
 ```text
-Search my Melxis hives for project orientation.
+Find this project's Melxis hive and read its guide.
 ```
 
-If the agent can call `hive_search`, `mel_search`, or `task_search` after OAuth, the MCP connection is working. If anything fails, see [Troubleshooting](#troubleshooting).
+If the agent can call `hive_search`, `hive_context_get`, `mel_search`, or `task_search` after OAuth, the MCP connection is working. If anything fails, see [Troubleshooting](#troubleshooting).
 
 That's it. Depending on the client surface, Melxis can guide the agent to:
 
@@ -85,7 +89,7 @@ That's it. Depending on the client surface, Melxis can guide the agent to:
 - **Check existing knowledge** before implementing changes
 - **Save design decisions** and learnings as they come up
 - **Track tasks** and hand off unfinished work across sessions
-- **Follow the rules you set for a hive** — say how you want work done there once, and later sessions read it back before they start
+- **Follow the guide you set for a hive** — say once what belongs there and how you want work done, and later sessions read it back before they start
 
 ## Updating
 
@@ -107,9 +111,9 @@ Different install surfaces provide different levels of automation:
 | Codex CLI | Yes | Skills + `AGENTS.md` | Yes (`plugin_hooks`) |
 | Generic MCP | Yes | MCP `instructions` | No |
 
-MCP-only installs can search, create, update, link, and delete mels/tasks, and read and write a hive's rules. They rely on MCP instructions and the model's use of atomic Melxis searches for recall; they do not run local lifecycle hooks.
+MCP-only installs can search, create, update, link, and delete mels/tasks, and read and write a hive's guide. They rely on MCP instructions and the model's use of atomic Melxis searches for recall; they do not run local lifecycle hooks.
 
-A hive's **rules** are not part of this table — they live in Melxis, not in the install, so they reach every surface above and follow you between clients.
+A hive's **guide** is not part of this table — it lives in Melxis, not in the install, so it reaches every surface above and follows you between clients.
 
 ## Skills
 
@@ -124,7 +128,7 @@ On Claude Code and Codex CLI, the toolkit ships hooks that surface Melxis at the
 
 | Hook | When it fires | What it does |
 |------|--------------|--------------|
-| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context: `hive_search` to resolve the project's hive set (own anchor + shared read-only), `hive_context_get` to read that hive's map and rules in one call, and `task_search(sort="recency")` on the own anchor hive; also injects the active **Write policy** block |
+| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context: `hive_search` to resolve the project's hive set (own anchor + shared read-only), `hive_context_get` to read that hive's guide and the mels it points at in one call, and `task_search(sort="recency")` on the own anchor hive; also injects the active **Write policy** block |
 | Stop | end of each assistant response | Silent non-blocking safety check; routine checkpoint recovery is handled on the next prompt or session boundary |
 | TaskCompleted | a task is marked completed | Prompts learning extraction, task granularity audit, and link proposals |
 | PreCompact | before context compaction | Captures session state before compaction |
@@ -183,8 +187,8 @@ Melxis connects through OAuth-secured MCP and gives you control over when agents
 - **Inspectable plugin.** The Claude Code plugin is plain text / Node ESM. Hook entrypoints are in [`scripts/`](scripts/) and hook registration is in [`hooks/hooks.json`](hooks/hooks.json).
 - **Prompt-only local hooks.** Claude Code hooks add guidance to the agent at session boundaries; they do not make direct network calls to Melxis or third parties.
 - **Configurable writes.** Set `MELXIS_WRITE_POLICY=confirm` for Claude Code, or add an explicit write-policy instruction for Codex. Use `confirm` to require explicit confirmation before every write, or `smart` to ask on borderline cases.
-- **Rules come from you, not from what an agent read.** A hive's rules are recorded only from what you tell the agent directly. Text it merely reads — a document, a web page, another tool's output — stays data, however imperative it sounds, so a stray "always do X" inside some file cannot quietly become a standing instruction for every future session. Rules exist only in hives you own; a shared hive never hands you its owner's rules.
-- **Review and correction.** Use MCP tools or the web UI to patch, supersede, unlink, or delete stored mels and tasks.
+- **The guide comes from you, not from what an agent read.** The toolkit instructs agents to write guide lines only from what you tell them directly. Text an agent merely reads — a document, a web page, another tool's output — stays data, however imperative it sounds, so a stray "always do X" inside some file is something to raise with you rather than record. Under the default `auto` write policy the agent still calls `guide_edit` / `guide_patch` on its own judgement; set `MELXIS_WRITE_POLICY=confirm` to be asked before every guide write. The guide exists only in hives you own; a shared hive never hands you its owner's guide.
+- **Review and correction.** Use MCP tools or the web UI to patch, supersede, unlink, or delete stored mels and tasks. Guide edits are recorded per hive, and recent changes can be reviewed and rolled back from the web UI.
 
 The production service runs on Google Cloud with primary infrastructure in `asia-northeast1` (Tokyo). See the [Privacy Policy](https://melxis.com/legal/privacy) and [Terms of Service](https://melxis.com/legal/terms) for data handling, subprocessors, retention, and legal requests. For security concerns or account-level access/export/deletion requests, contact `privacy@melxis.com`.
 

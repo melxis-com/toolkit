@@ -11,7 +11,9 @@ import {
   findLastCaptureAnchorIndex,
   findLastSubstantialProgressIndex,
   hasTaskLikeContext,
-  hasTaskUpdateAfterIndex,
+  hasActiveMelxisTask,
+  hasTaskWriteAfterIndex,
+  findTurnStartIndex,
   hasToolCallMatchingAfterIndex,
   PATTERNS,
   readTranscriptTail,
@@ -28,6 +30,12 @@ function textEntry(role, text) {
 
 function toolUseEntry(name, input) {
   return { message: { role: 'assistant', content: [{ type: 'tool_use', name, input }] } };
+}
+
+// Tool results are recorded under the user role in Claude Code transcripts —
+// findTurnStartIndex must not mistake them for the prompt that opened the turn.
+function toolResultEntry(text) {
+  return { message: { role: 'user', content: [{ type: 'tool_result', content: text }] } };
 }
 
 test('operation checkpoints keep transcript order for post-checkpoint save gating', () => {
@@ -108,15 +116,101 @@ test('readTranscriptTail reads regular transcript paths under home', () => {
   }
 });
 
-test('hasTaskUpdateAfterIndex only counts task updates after the checkpoint', () => {
+test('hasTaskWriteAfterIndex only counts task writes after the checkpoint', () => {
   const entries = [
     toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'in_progress' }),
     toolUseEntry('functions.exec_command', { cmd: 'git commit -m "hook behavior"' }),
   ];
 
-  assert.equal(hasTaskUpdateAfterIndex(entries, 1), false);
-  assert.equal(hasTaskUpdateAfterIndex(entries, 0), false);
-  assert.equal(hasTaskUpdateAfterIndex(entries, -1), true);
+  assert.equal(hasTaskWriteAfterIndex(entries, 1), false);
+  assert.equal(hasTaskWriteAfterIndex(entries, 0), false);
+  assert.equal(hasTaskWriteAfterIndex(entries, -1), true);
+});
+
+test('hasTaskWriteAfterIndex counts task_patch and task_create, not task reads', () => {
+  // The product steers agents toward task_patch for localized description
+  // edits; counting only task_update made compliant sessions look
+  // non-compliant and the reminder fired right after the write.
+  assert.equal(
+    hasTaskWriteAfterIndex([toolUseEntry('mcp__plugin_melxis_melxis__task_patch', { id: 't1' })], -1),
+    true,
+  );
+  assert.equal(
+    hasTaskWriteAfterIndex([toolUseEntry('mcp__melxis__.task_create', { title: 'anchor' })], -1),
+    true,
+  );
+  assert.equal(
+    hasTaskWriteAfterIndex([toolUseEntry('mcp__melxis__.task_get', { id: 't1' })], -1),
+    false,
+  );
+  assert.equal(
+    hasTaskWriteAfterIndex([toolUseEntry('mcp__melxis__.task_search', { query: 'x' })], -1),
+    false,
+  );
+});
+
+test('findTurnStartIndex walks back to the user prompt that opened the turn', () => {
+  const entries = [
+    textEntry('user', 'please fix the reminder'),
+    toolUseEntry('mcp__melxis__.task_patch', { id: 't1' }),
+    toolResultEntry('{"id":"t1"}'),
+    textEntry('assistant', 'fixed the matcher and updated the task'),
+  ];
+
+  // The closing prose (index 3) belongs to the turn opened at index 0.
+  assert.equal(findTurnStartIndex(entries, 3), 0);
+  // tool_result entries carry the user role but are not prompts.
+  assert.equal(findTurnStartIndex(entries, 2), 0);
+  // No prompt boundary in the window: fall back to the given index.
+  assert.equal(findTurnStartIndex(entries.slice(1), 2), 2);
+});
+
+test('findTurnStartIndex stops at a session boundary instead of walking into the previous session', () => {
+  // A stale task write before the boundary must not count as reflecting
+  // progress made after it (review 2026-07-30).
+  const entries = [
+    textEntry('user', 'previous session prompt'),
+    toolUseEntry('mcp__melxis__.task_patch', { id: 't1' }),
+    { type: 'hook_success', message: { role: 'user', content: 'Melxis Session Resumed' } },
+    toolUseEntry('functions.exec_command', { cmd: 'git commit -m "step"' }),
+    textEntry('assistant', 'implemented the step and committed it'),
+  ];
+
+  // The walk from the post-boundary prose stops at the boundary (index 2),
+  // not at the pre-boundary prompt (index 0).
+  assert.equal(findTurnStartIndex(entries, 4), 2);
+});
+
+test('task lifecycle transitions count a status carried by task_patch (closure rides either tool)', () => {
+  // task_patch accepts an optional status; closing through it must clear the
+  // active-task state exactly like task_update(status=completed).
+  const opened = [toolUseEntry('mcp__melxis__.task_update', { id: 't1', status: 'in_progress' })];
+  assert.equal(hasActiveMelxisTask(opened), true);
+
+  const closedByPatch = [
+    ...opened,
+    toolUseEntry('mcp__plugin_melxis_melxis__task_patch', {
+      id: 't1',
+      old_text: 'Next: ship',
+      new_text: 'Outcome: shipped',
+      status: 'completed',
+    }),
+  ];
+  assert.equal(hasActiveMelxisTask(closedByPatch), false);
+
+  // A plain task_patch without status is not a lifecycle transition.
+  const patchedOnly = [
+    ...opened,
+    toolUseEntry('mcp__plugin_melxis_melxis__task_patch', { id: 't1', old_text: 'a', new_text: 'b' }),
+  ];
+  assert.equal(hasActiveMelxisTask(patchedOnly), true);
+});
+
+test('hasTaskLikeContext counts task_patch as task context', () => {
+  assert.equal(
+    hasTaskLikeContext([toolUseEntry('mcp__plugin_melxis_melxis__task_patch', { id: 't1' })]),
+    true,
+  );
 });
 
 test('task-like context can come from an active Melxis task or task wording', () => {

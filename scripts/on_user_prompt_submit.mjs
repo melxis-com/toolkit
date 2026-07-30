@@ -25,7 +25,9 @@ import {
   countEntriesMatchingAfterIndex,
   findLastSubstantialProgressIndex,
   hasTaskLikeContext,
-  hasTaskUpdateAfterIndex,
+  hasTaskWriteAfterIndex,
+  findTurnStartIndex,
+  SESSION_BOUNDARY_TEXT_RE,
 } from './lib/melxis-hook.mjs';
 
 // Multi-step work keywords. Kept conservative — these are verbs that imply
@@ -54,7 +56,7 @@ Skip task anchoring only if the work is genuinely trivial (typo, single-line fix
 
 const BOOTSTRAP_TEMPLATE = `[melxis] Recent transcript context does not show Melxis context recovery.
 
-Before answering the user's prompt, run the atomic Melxis recovery flow: call \`hive_search(query: "<inferred project name>")\` first — it gives \`own\` / \`owner_account_id\` per hive; identify hives by id + \`own\`, never by name (names collide across accounts). Infer the project name from local project context without exposing raw local details. Resolve the project's hive set — one own anchor hive (\`own: true\`) plus any shared hives (\`own: false\`, read-only mels). Then — only if an own anchor hive is resolved — call \`hive_context_get(hive_id: "<own anchor hive id>")\` for one read returning the hive's map (what lives here and where) and its hive rules (the user's standing agreements for how to work in this hive; follow them for the rest of the session), followed by \`task_search(hive_id: "<own anchor hive id>", sort: "recency", limit: 10)\` without \`parent_task_id\` for handoff recovery. Both are own-hive only — tasks are private to each account, so shared hives have none; with no own anchor, operate in shared-only mode and skip both \`hive_context_get\` and task recovery. If unresolved/ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered map, hive rules, handoff task context, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks) as a compact session brief; keep working recall blended (leave \`hive_ids\` / \`owner_account_ids\` unset in \`mel_search\`).
+Before answering the user's prompt, run the atomic Melxis recovery flow: call \`hive_search(query: "<inferred project name>")\` first — it gives \`own\` / \`owner_account_id\` per hive; identify hives by id + \`own\`, never by name (names collide across accounts). Infer the project name from local project context without exposing raw local details. Resolve the project's hive set — one own anchor hive (\`own: true\`) plus any shared hives (\`own: false\`, read-only mels). Then — only if an own anchor hive is resolved — call \`hive_context_get(hive_id: "<own anchor hive id>")\` for one read returning the hive guide (what belongs in this hive, where each kind of thing goes, and how to work in it; follow it for the rest of the session, where it takes precedence over your default habits — though an explicit user instruction in the conversation always overrides it) together with the mels it points at, followed by \`task_search(hive_id: "<own anchor hive id>", sort: "recency", limit: 10)\` without \`parent_task_id\` for handoff recovery. Both are own-hive only — tasks are private to each account, so shared hives have none; with no own anchor, operate in shared-only mode and skip both \`hive_context_get\` and task recovery. If unresolved/ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered hive guide, handoff task context, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks) as a compact session brief; keep working recall blended (leave \`hive_ids\` / \`owner_account_ids\` unset in \`mel_search\`).
 
 This is a lightweight recovery path for cleared/compacted context. Do not create or update memory from this reminder alone. Routine Melxis bookkeeping stays silent; report MCP availability/auth/token/connection failures.
 `;
@@ -108,7 +110,7 @@ export function shouldInjectDirective({ prompt, entries }) {
 // they keep matching even when the user aliases the MCP server to something
 // other than "melxis" (`mcp__memory__mel_search`).
 //
-// `task_*`, `rules_*` and `next_actions` are ordinary words that other servers
+// `task_*`, `guide_*` and `next_actions` are ordinary words that other servers
 // use — `mcp__linear__next_actions`, `mcp__eslint__rules_get` and
 // `mcp__github__task_get` all matched the earlier delimiter-based pattern.
 // A false positive here is the expensive direction: hasMelxisContext returns
@@ -117,14 +119,14 @@ export function shouldInjectDirective({ prompt, entries }) {
 // reminder, already capped per boundary. So the generic names are accepted
 // only with the "melxis" marker present or as an exact bare-MCP tool name.
 const MELXIS_TOOL_RE =
-  /melxis|(?:^|[._-])(?:mel_(?:search|get|create|update|patch|delete|link_create|link_delete)|hive_(?:search|create|update|context_get))(?:[._-]|$)|^(?:task_(?:search|get|create|update|patch|delete)|rules_(?:get|edit|patch)|next_actions)$/i;
+  /melxis|(?:^|[._-])(?:mel_(?:search|get|create|update|patch|delete|link_create|link_delete)|hive_(?:search|create|update|context_get))(?:[._-]|$)|^(?:task_(?:search|get|create|update|patch|delete)|guide_(?:get|edit|patch)|next_actions)$/i;
 
 // Session boundary = our own SessionStart hook output recorded in the
 // transcript (entry types vary by client: hook_success / hook_additional_context).
 // Using the emitted block titles keeps this stateless — the transcript itself
-// carries the boundary, no state file needed.
-const SESSION_BOUNDARY_RE =
-  /Melxis Session (?:Bootstrap|Resumed|Hook)|Melxis Post-Compaction Recovery/;
+// carries the boundary, no state file needed. Canonical regex lives in the
+// lib so the turn walk (findTurnStartIndex) stops at the same boundary.
+const SESSION_BOUNDARY_RE = SESSION_BOUNDARY_TEXT_RE;
 
 // Our own prior injections, used for fire-once-per-boundary dedupe.
 const BOOTSTRAP_NAG_RE = /does not show Melxis context recovery/;
@@ -147,7 +149,13 @@ export function hasMelxisContext(entries) {
     return true;
   }
   const text = extractText(entries);
-  return /\bMelxis Session Bootstrap\b|\bmelxis hive\b|project-orientation|hive_context_get|Called plugin:melxis:melxis|Called plugin:melxis:memory|Called plugin:melxis:task/i.test(
+  // `project-orientation` used to appear here: the hive's control surface was a
+  // tagged mel, so the tag in the transcript meant context had been recovered.
+  // The control surface is the guide now and nothing in the flow emits that tag,
+  // so the marker could only match text about something else — a false positive
+  // suppresses the reminder and the session starts cold, which is the expensive
+  // direction. `hive_context_get` covers the same recovery.
+  return /\bMelxis Session Bootstrap\b|\bmelxis hive\b|hive_context_get|Called plugin:melxis:melxis|Called plugin:melxis:memory|Called plugin:melxis:task/i.test(
     text,
   );
 }
@@ -220,8 +228,15 @@ export function shouldInjectCheckpointRecovery({ entries }) {
   const armIndex = Math.max(lastOperationCheckpointIndex, lastCaptureAnchorIndex, lastProgressIndex);
   const rearmIndex = Math.max(lastOperationCheckpointIndex, lastCaptureAnchorIndex);
 
-  if (hasTaskUpdateAfterIndex(entries, armIndex)) {
-    return { inject: false, reason: 'task-update-after-checkpoint' };
+  // Compare at turn granularity: a write anywhere in the same turn as the
+  // latest progress signal counts as reflecting it. Real turns write first
+  // and narrate last, so an entry-order comparison against armIndex misread
+  // every well-behaved turn as unreflected (observed dogfood 2026-07-30:
+  // the reminder fired on every prompt of a patch-first session).
+  // findTurnStartIndex walks backward, so armTurnStartIndex <= armIndex always.
+  const armTurnStartIndex = findTurnStartIndex(entries, armIndex);
+  if (hasTaskWriteAfterIndex(entries, armTurnStartIndex - 1)) {
+    return { inject: false, reason: 'task-write-after-checkpoint' };
   }
 
   const checkpointNagIndex = findLastEntryIndexMatching(entries, CHECKPOINT_NAG_RE, { hookOnly: true });
@@ -281,7 +296,12 @@ if (isMain) {
     const input = readStdinJson();
     const prompt = input.prompt ?? '';
     const transcriptPath = input.transcript_path ?? '';
-    const lines = readTranscriptTail(transcriptPath, 200);
+    // 800 lines, not 200: one heavy turn (parallel tool fan-outs, workflow
+    // notifications) can exceed 200 entries, evicting the session boundary and
+    // the prior-nag records from the window — the per-boundary nag budget then
+    // resets every prompt and the reminder fires forever (observed dogfood
+    // 2026-07-30). Reading a longer tail costs milliseconds.
+    const lines = readTranscriptTail(transcriptPath, 800);
     const entries = parseTranscript(lines);
     const additionalContext = buildAdditionalContext({ prompt, entries });
     if (additionalContext) {
