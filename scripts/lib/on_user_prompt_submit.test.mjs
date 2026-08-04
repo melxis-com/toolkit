@@ -747,6 +747,59 @@ test('the cue to write the guide reaches the startup, resume and compact paths a
   );
 });
 
+// An agent whose hives do not fit the work in front of it can recall (shared
+// and unrelated hives are readable) but has nowhere to write: every write path
+// needs a hive that fits, and nothing in the injected text ever said how to get
+// one or where a note with no project belongs. The memory loop therefore never
+// starts, silently. The cue that closes this fires at the first save-worthy
+// moment rather than at session start, so — like the cue to write the guide —
+// it belongs in RULES_POINTER_BLOCK, which reaches startup/resume/compact.
+// BOOTSTRAP_TEMPLATE is the fourth path and lives in the other hook file, which
+// receives nothing from on_session_start.mjs, so it carries a hand-mirrored
+// copy. Two hand-kept copies drift unless both are pinned: assert the fourth
+// path directly instead of inferring it from the other three.
+//
+// The needles are fragments of HIVE_CUE_SHORT; the full verbatim wording is
+// pinned once, in client-surface-language.test.mjs.
+test('the no-fitting-hive cue reaches all four recovery paths', () => {
+  const here = new URL('.', import.meta.url).pathname;
+  const NEEDLES = [
+    // the condition — a project with no hive that fits it, owning none at all
+    // being one case of that rather than the whole rule
+    'When a clear project has no fitting own hive (or you own none at all)',
+    // the action, at the first save-worthy moment, with the name to suggest
+    'propose creating one at the first save-worthy mel or task with `hive_create`',
+    // hive creation is the one write that asks, even under the auto policy
+    'hive creation asks the user even under auto write policy',
+    // and the new hive gets its guide from what the user just said
+    'write its first guide with `guide_edit` from the purpose the user just stated',
+    // the third clause: a note with no project needs no proposal, it has a home
+    'A stray note that belongs to no project goes to the Default hive',
+    // and the way to find that home again without a query
+    'an argless `hive_search` lists every hive you can reach',
+  ];
+
+  for (const source of ['startup', 'resume', 'compact', 'clear']) {
+    const { stdout: out } = spawnSync(process.execPath, [join(here, '..', 'on_session_start.mjs')], {
+      input: JSON.stringify({ source }),
+      encoding: 'utf8',
+    });
+    for (const needle of NEEDLES) {
+      assert.ok(out.includes(needle), `source=${source} output is missing "${needle}"`);
+    }
+  }
+
+  // The fourth path: the UserPromptSubmit reminder, checked as its own block so
+  // a copy that only sits elsewhere in the file cannot stand in for it.
+  const userPrompt = readFileSync(join(here, '..', 'on_user_prompt_submit.mjs'), 'utf8');
+  const start = userPrompt.indexOf('const BOOTSTRAP_TEMPLATE = `');
+  assert.ok(start >= 0, 'on_user_prompt_submit.mjs has no BOOTSTRAP_TEMPLATE');
+  const bootstrap = userPrompt.slice(start, userPrompt.indexOf('\n`;', start)).replaceAll('\\`', '`');
+  for (const needle of NEEDLES) {
+    assert.ok(bootstrap.includes(needle), `BOOTSTRAP_TEMPLATE is missing "${needle}"`);
+  }
+});
+
 // hive_context_get and guide_* fall outside the <entity>_<verb> shape. Under a
 // plugin-prefixed registration the trailing "melxis" catches them anyway, which
 // hides the gap, so pin detection on the bare-MCP names. Miss this and an agent

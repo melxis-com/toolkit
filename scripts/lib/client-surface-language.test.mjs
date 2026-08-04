@@ -1,9 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const ROOT = new URL('../..', import.meta.url);
+// fileURLToPath, not the URL's own pathname: a pathname keeps its
+// percent-escapes, so a checkout under a path containing a space or a "%2F"
+// resolves to a name that does not exist on disk, and every read here — the
+// fixed files and the repo-wide walk below alike — fails with ENOENT instead
+// of reporting drift.
+const ROOT_DIR = fileURLToPath(ROOT);
 
 const CLIENT_SURFACE_FILES = [
   'AGENTS.md',
@@ -20,7 +27,7 @@ const CLIENT_SURFACE_FILES = [
 function readSurface() {
   return CLIENT_SURFACE_FILES.map((file) => ({
     file,
-    text: readFileSync(join(ROOT.pathname, file), 'utf8'),
+    text: readFileSync(join(ROOT_DIR, file), 'utf8'),
   }));
 }
 
@@ -37,7 +44,7 @@ function readSurface() {
 // into a table of contents nobody could act on, and re-introducing that
 // vocabulary would reproduce the same failure under a new name.
 
-const memorySkill = () => readFileSync(join(ROOT.pathname, 'skills/memory/SKILL.md'), 'utf8');
+const memorySkill = () => readFileSync(join(ROOT_DIR, 'skills/memory/SKILL.md'), 'utf8');
 
 // Control-surface wording that the guide replaced. General English ("a
 // narrower rule than", `Array.prototype.map`, "Map of Content") is untouched
@@ -189,7 +196,7 @@ test('melxis-memory keeps the guide provenance constraint verbatim-strength', ()
 
 test('melxis-memory keeps the guide wording guidance', () => {
   const text = memorySkill();
-  const agents = readFileSync(join(ROOT.pathname, 'AGENTS.md'), 'utf8');
+  const agents = readFileSync(join(ROOT_DIR, 'AGENTS.md'), 'utf8');
 
   // Lines are worded positively (a boundary paired with the safe alternative),
   // ordered by weight, and pruned by a concrete test — the instruction-following
@@ -204,7 +211,7 @@ test('melxis-memory keeps the guide wording guidance', () => {
 
 test('melxis-memory keeps the guide curation gates from the first dogfood day', () => {
   const text = memorySkill();
-  const agents = readFileSync(join(ROOT.pathname, 'AGENTS.md'), 'utf8');
+  const agents = readFileSync(join(ROOT_DIR, 'AGENTS.md'), 'utf8');
 
   // Three gates, each earned by a measured failure on 2026-07-29:
   // - section-filling: a guide grew sections that restated hive_search output,
@@ -221,7 +228,7 @@ test('melxis-memory keeps the guide curation gates from the first dogfood day', 
 
 test('guide links carry the mel summary as the triage handle', () => {
   const text = memorySkill();
-  const agents = readFileSync(join(ROOT.pathname, 'AGENTS.md'), 'utf8');
+  const agents = readFileSync(join(ROOT_DIR, 'AGENTS.md'), 'utf8');
 
   // The link's job is to let an agent decide which mels to read without
   // fetching bodies. That handle is the mel's own summary (refined by the
@@ -262,7 +269,7 @@ test('client surface avoids create-first Melxis memory/task wording', () => {
 });
 
 test('UserPromptSubmit checkpoint recovery prefers existing mel refinement before creation', () => {
-  const text = readFileSync(join(ROOT.pathname, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
+  const text = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
 
   assert.match(text, /search existing mels first/i);
   assert.match(text, /prefer \\?`mel_patch\\?` \/ \\?`mel_update\\?`/i);
@@ -270,22 +277,22 @@ test('UserPromptSubmit checkpoint recovery prefers existing mel refinement befor
 });
 
 test('UserPromptSubmit checkpoint recovery preserves evidence status for uncertain signals', () => {
-  const text = readFileSync(join(ROOT.pathname, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
+  const text = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
 
   assert.match(text, /user-reported observations need \\?`user-reported\\?` \+ \\?`needs-verification\\?`/i);
   assert.match(text, /hypotheses should become verification tasks/i);
 });
 
 test('UserPromptSubmit reminders prefer existing task before task_create', () => {
-  const text = readFileSync(join(ROOT.pathname, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
+  const text = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
 
   assert.match(text, /If an existing task matches this work/i);
   assert.match(text, /If no existing task matches, call \\?`task_create\\?`/i);
 });
 
 test('Session bootstrap and prompt recovery form a compact session brief', () => {
-  const sessionStart = readFileSync(join(ROOT.pathname, 'scripts/on_session_start.mjs'), 'utf8');
-  const userPrompt = readFileSync(join(ROOT.pathname, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
+  const sessionStart = readFileSync(join(ROOT_DIR, 'scripts/on_session_start.mjs'), 'utf8');
+  const userPrompt = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
   for (const text of [sessionStart, userPrompt]) {
     assert.match(text, /session brief/i);
     assert.match(text, /hive_context_get/i);
@@ -306,7 +313,7 @@ test('Session bootstrap and prompt recovery form a compact session brief', () =>
 // compared here. Without this, AGENTS.md is free to keep an older recall path
 // while both hooks have already moved on, and nothing fails.
 test('AGENTS.md describes the same recall call sequence as the hooks', () => {
-  const agents = readFileSync(join(ROOT.pathname, 'AGENTS.md'), 'utf8');
+  const agents = readFileSync(join(ROOT_DIR, 'AGENTS.md'), 'utf8');
 
   assert.match(agents, /hive_search/i);
   assert.match(agents, /hive_context_get/i);
@@ -344,13 +351,13 @@ test('AGENTS.md describes the same recall call sequence as the hooks', () => {
 test('melxis-task cross-references the hive guide', () => {
   // The guide governs task work too; this line is the only bridge from the
   // task skill to the hive's control surface, so its loss must fail loudly.
-  const taskSkill = readFileSync(join(ROOT.pathname, 'skills/task/SKILL.md'), 'utf8');
+  const taskSkill = readFileSync(join(ROOT_DIR, 'skills/task/SKILL.md'), 'utf8');
   assert.match(taskSkill, /hive_context_get/);
   assert.match(taskSkill, /takes precedence over your default habits/);
 });
 
 test('README describes the current recall flow', () => {
-  const readme = readFileSync(join(ROOT.pathname, 'README.md'), 'utf8');
+  const readme = readFileSync(join(ROOT_DIR, 'README.md'), 'utf8');
 
   assert.match(readme, /hive_search/);
   assert.match(readme, /hive_context_get/);
@@ -420,7 +427,7 @@ function hookBlock(text, name) {
 test('every surface that gives the guide precedence also states its ceiling', () => {
   const violations = [];
   for (const [file, ceiling] of Object.entries(PRECEDENCE_CEILING)) {
-    const text = readFileSync(join(ROOT.pathname, file), 'utf8');
+    const text = readFileSync(join(ROOT_DIR, file), 'utf8');
     // The claim itself must still be there — the ceiling is a bound on it, not
     // a replacement for it.
     if (!/takes precedence over (?:your|an agent's) default habits/i.test(text)) {
@@ -443,7 +450,7 @@ test('every restatement of the precedence claim carries its own ceiling', () => 
   const violations = [];
 
   for (const file of ['AGENTS.md', 'skills/memory/SKILL.md', 'skills/task/SKILL.md']) {
-    const text = readFileSync(join(ROOT.pathname, file), 'utf8');
+    const text = readFileSync(join(ROOT_DIR, file), 'utf8');
     const claims = text.match(claim)?.length ?? 0;
     const ceilings = text.match(ceiling)?.length ?? 0;
     if (claims === 0) violations.push(`${file}: lost the precedence claim`);
@@ -459,7 +466,7 @@ test('every restatement of the precedence claim carries its own ceiling', () => 
 // ceiling in the startup block alone never reaches a resumed session, so the
 // two branches are checked separately — file-level matching would pass on one.
 test('both SessionStart branches carry the precedence ceiling', () => {
-  const text = readFileSync(join(ROOT.pathname, 'scripts/on_session_start.mjs'), 'utf8');
+  const text = readFileSync(join(ROOT_DIR, 'scripts/on_session_start.mjs'), 'utf8');
 
   assert.match(hookBlock(text, 'STARTUP_BLOCK'), CEILING_SHORT);
   assert.match(hookBlock(text, 'RESUME_BLOCK'), CEILING_SHORT);
@@ -469,9 +476,60 @@ test('both SessionStart branches carry the precedence ceiling', () => {
 // context: the agent that receives it has, by construction, lost the session
 // start blocks.
 test('the UserPromptSubmit bootstrap reminder carries the precedence ceiling', () => {
-  const text = readFileSync(join(ROOT.pathname, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
+  const text = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
 
   assert.match(hookBlock(text, 'BOOTSTRAP_TEMPLATE'), CEILING_SHORT);
+});
+
+// --- where a save goes when no own hive fits it ----------------------------
+//
+// Shared hives make recall work from day one, so an account looks healthy
+// while every write path quietly has nowhere to go: mels, tasks and the guide
+// all need a hive the account owns. The first cue fired only when the account
+// owned nothing at all, which answered the rarer half of the problem: an
+// account that already owns hives, none of them fitting the project in front
+// of it, still had no rule — and a note belonging to no project had nowhere to
+// land either way. The cue now generalises the condition (no fitting own hive,
+// owning none at all being one case of that) and names the Default hive as the
+// fallback inbox, while still keeping session start silent by firing at the
+// first moment something is worth writing.
+//
+// Pinned verbatim: this is one sentence kept by hand in two hook files, and
+// two hand-kept copies drift unless a test compares them to the same string.
+// Surfaces render tool names as code spans, so backticks around them are
+// optional in the needle — nothing else may vary.
+const HIVE_CUE_SHORT_TEXT =
+  "When a clear project has no fitting own hive (or you own none at all), propose creating one at the first save-worthy mel or task with hive_create — suggest a name (the project's own, e.g. the repo) and a one-line description; hive creation asks the user even under auto write policy — then write its first guide with guide_edit from the purpose the user just stated. A stray note that belongs to no project goes to the Default hive, the fallback inbox every account starts with (an argless hive_search lists every hive you can reach; `own` tells yours apart), not a project's home.";
+
+const HIVE_CUE_SHORT = new RegExp(
+  HIVE_CUE_SHORT_TEXT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(
+    /(hive_create|guide_edit|hive_search)/g,
+    '`?$1`?',
+  ),
+  'i',
+);
+
+// Per file, because the copies are independent: RULES_POINTER_BLOCK is local to
+// on_session_start.mjs and reaches startup/resume/compact, while
+// BOOTSTRAP_TEMPLATE is the fourth path in the other hook file and receives
+// nothing from the first. Same shape as PRECEDENCE_CEILING above.
+const COLD_START_CUE = {
+  'scripts/on_session_start.mjs': { block: 'RULES_POINTER_BLOCK', cue: HIVE_CUE_SHORT },
+  'scripts/on_user_prompt_submit.mjs': { block: 'BOOTSTRAP_TEMPLATE', cue: HIVE_CUE_SHORT },
+};
+
+test('both hook files carry the no-own-hive cue in the same words', () => {
+  const violations = [];
+  for (const [file, { block, cue }] of Object.entries(COLD_START_CUE)) {
+    const text = readFileSync(join(ROOT_DIR, file), 'utf8');
+    // Unescape after slicing the block out: hookBlock finds the closing
+    // backtick of the template literal, which only works while the inner
+    // backticks are still escaped.
+    const body = hookBlock(text, block).replaceAll('\\`', '`');
+    if (!cue.test(body)) violations.push(`${file}: ${block} does not carry the cue verbatim`);
+  }
+
+  assert.deepEqual(violations, []);
 });
 
 // --- guide grounding composes, it does not just forbid ---------------------
@@ -492,7 +550,7 @@ const GUIDE_PROVENANCE = {
 
 test('the prose surfaces state the composed grounding rule, not the absolute one', () => {
   for (const [file, provenance] of Object.entries(GUIDE_PROVENANCE)) {
-    const text = readFileSync(join(ROOT.pathname, file), 'utf8');
+    const text = readFileSync(join(ROOT_DIR, file), 'utf8');
 
     // Half one: how-to-work lines require the user (kept verbatim — this is the
     // injection defence, and it is quoted in the same words on every surface).
@@ -525,7 +583,7 @@ test('the prose surfaces state the composed grounding rule, not the absolute one
 });
 
 test('the SessionStart rules pointer states the composed grounding rule', () => {
-  const text = readFileSync(join(ROOT.pathname, 'scripts/on_session_start.mjs'), 'utf8');
+  const text = readFileSync(join(ROOT_DIR, 'scripts/on_session_start.mjs'), 'utf8');
   const pointer = hookBlock(text, 'RULES_POINTER_BLOCK');
 
   // Same rule, one sentence: this block ships with every session.
@@ -602,11 +660,148 @@ test('melxis-memory lists the pin request and the second telling as triggers', (
 });
 
 test('AGENTS.md lists the pin request and the second telling as triggers', () => {
-  const agents = readFileSync(join(ROOT.pathname, 'AGENTS.md'), 'utf8');
+  const agents = readFileSync(join(ROOT_DIR, 'AGENTS.md'), 'utf8');
 
   assert.match(agents, /always start from/i);
   assert.match(agents, SECOND_TELLING);
   assert.doesNotMatch(agents, CONFIRMATION_IMPLICATION);
+});
+
+// --- resolving where a save goes ------------------------------------------
+//
+// Every recall path resolves an own anchor hive, and every write lands in one.
+// An account with no hive that fits the work therefore reads shared knowledge
+// and never saves anything: the memory loop never starts, and nothing on any
+// surface says how it should. Session start is the wrong place to fix it —
+// nothing is worth saving yet, so a prompt there is nagging. The moment is the
+// first mel or task worth writing, which is why the cue belongs where an agent
+// looks when it is about to create a hive, with the session-start flow only
+// pointing forward to it. A note that belongs to no project needs no proposal
+// at all: it goes to the Default hive, silently.
+//
+// The wording is pinned per surface, the same way the precedence ceiling is:
+// the same rule is stated in the hook blocks, in AGENTS.md and in the skill,
+// and three paraphrases of one rule read as three rules. Prose surfaces get
+// the long form; the flow line and the hook blocks get the short one.
+
+const HIVE_CUE_PROSE = `If a clear project is at hand but no own hive fits it — or hive_search returns no own hive at all — propose creating one at the first save-worthy mel or task with hive_create: suggest a name (the project's own name, such as the repo's) and a one-line description, and get the user's confirmation — hive creation asks even under auto write policy, because the hive's name and purpose are the user's to state. Then write its first guide with guide_edit from the purpose the user just stated. A stray note that belongs to no project goes to the Default hive instead — the fallback inbox every account starts with (if you need to find it, an argless hive_search lists every hive you can reach and \`own\` tells yours apart); it is a holding place, not a project's home.`;
+
+const verbatim = (text) => new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+
+// Per-file dict rather than one shared pattern: each surface carries the form
+// that fits how it is read, and a file that quietly switches to the other one
+// (or to a paraphrase) has to fail here. The short form is HIVE_CUE_SHORT_TEXT,
+// declared with the hook-block pin above — one string, so the AGENTS.md flow
+// line and the two hook blocks cannot drift apart. The hook files themselves
+// are pinned in on_user_prompt_submit.test.mjs, next to the rest of the
+// hook-block assertions.
+const HIVE_COLD_START = {
+  'skills/memory/SKILL.md': verbatim(HIVE_CUE_PROSE),
+  'AGENTS.md': verbatim(HIVE_CUE_SHORT_TEXT),
+};
+
+test('the prose surfaces carry the cold-start hive cue verbatim', () => {
+  const violations = [];
+  for (const [file, cue] of Object.entries(HIVE_COLD_START)) {
+    const text = readFileSync(join(ROOT_DIR, file), 'utf8');
+    if (!cue.test(text)) violations.push(`${file}: no cold-start hive cue`);
+  }
+
+  assert.deepEqual(violations, []);
+});
+
+// The superseded wording fired on one condition only — the account owns no
+// hive at all — and said nothing about where a note with no project goes. Six
+// hand-kept copies carry this rule, so a half-finished migration leaves an
+// agent reading the narrow rule on one surface and the general one on another
+// in the same session, and a contradiction is resolved by whichever copy was
+// read last. The retired phrasings are therefore banned repo-wide rather than
+// only on the surfaces the verbatim pins above cover: a stale copy in a README
+// section, a hook comment or another test is the same failure.
+//
+// The last entry retires a wording that was wrong rather than narrow: an
+// argless hive_search returns own and shared hives alike, so "lists your own
+// hives" invites an agent to take a shared hive for one of its own and write
+// there — the one thing the write scope forbids.
+const RETIRED_HIVE_CUE = [
+  /No own hive \(shared hives do not count\)/i,
+  /If hive_search returns no own hive/i,
+  /recall stays shared-only — and at the first save-worthy/i,
+  /propose creating a hive with hive_create: suggest a name and a one-line description/i,
+  /propose creating one with `?hive_create`? \(suggest a name and one-line description/i,
+  /argless `?hive_search`? lists your own hives/i,
+];
+
+const SCANNED_EXTENSIONS = new Set(['.md', '.mjs', '.js', '.json', '.sh', '.yml', '.yaml', '.txt']);
+const SKIPPED_DIRECTORIES = new Set(['.git', 'node_modules', 'assets']);
+
+/** Every text file in the repository, so no surface is exempt by omission. */
+function* textFiles(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!SKIPPED_DIRECTORIES.has(entry.name)) yield* textFiles(path);
+    } else if (SCANNED_EXTENSIONS.has(entry.name.slice(entry.name.lastIndexOf('.')))) {
+      yield path;
+    }
+  }
+}
+
+test('no file still carries the retired no-own-hive-at-all wording', () => {
+  // This file is the one exemption: it quotes the retired sentences in order
+  // to ban them, and scanning itself would make the ban unstatable.
+  const self = fileURLToPath(import.meta.url);
+  const violations = [];
+
+  for (const path of textFiles(ROOT_DIR)) {
+    if (path === self) continue;
+    const text = readFileSync(path, 'utf8');
+    for (const pattern of RETIRED_HIVE_CUE) {
+      if (pattern.test(text)) violations.push(`${relative(ROOT_DIR, path)}: ${pattern}`);
+    }
+  }
+
+  assert.deepEqual(violations, []);
+});
+
+// Placement, not just presence: the cue is the answer to "when does this
+// happen", so it has to open the section an agent lands on when it looks up
+// hive_create — after the call example it reads as a footnote to a capability
+// it has already decided to use.
+test('the memory skill opens Create a hive with when it fires', () => {
+  const text = memorySkill();
+  const start = text.indexOf('### Create a hive');
+  assert.ok(start !== -1, 'the "Create a hive" section must exist');
+  const end = text.indexOf('\n### ', start + 1);
+  const section = text.slice(start, end === -1 ? undefined : end);
+
+  const cue = section.search(HIVE_COLD_START['skills/memory/SKILL.md']);
+  assert.ok(cue !== -1, 'the "Create a hive" section must carry the cold-start cue');
+  assert.ok(
+    cue < section.indexOf('```'),
+    'the cue must open the section, before the hive_create example',
+  );
+
+  // Creating the hive and writing its first guide are one move: the user has
+  // just said what the hive is for, and that statement is the grounding a
+  // first guide needs. The cue ends on guide_edit for the same reason, so
+  // losing this hand-off would leave the two halves stated only once each.
+  assert.match(section, /\*\*After hive_create, write the hive's guide\*\*/);
+});
+
+// Session start stays silent — but silence with no forward pointer is how the
+// hole stayed open: an agent that reads "operate in shared-only mode" learns
+// that owning no hive is a steady state, and never reaches the section that
+// says it is not.
+test('the session-start flow points from shared-only mode to hive creation', () => {
+  const text = memorySkill();
+  const step = text.split('\n').find((line) => /operate in shared-only mode/.test(line));
+  assert.ok(step, 'the session-start flow must still describe shared-only mode');
+  assert.match(step, /Create a hive/);
+
+  // The pointer is a pointer: the flow must not restate the trigger here, or
+  // session start becomes the moment the agent acts on it.
+  assert.doesNotMatch(step, /hive_create/);
 });
 
 // --- a sub-task decision that changes the plan changes the parent ----------
@@ -615,7 +810,7 @@ test('AGENTS.md lists the pin request and the second telling as triggers', () =>
 // parent kept its old plan, and the next session resumed from a description
 // that no longer described the work.
 test('melxis-task sends plan-changing sub-task decisions back to the parent', () => {
-  const taskSkill = readFileSync(join(ROOT.pathname, 'skills/task/SKILL.md'), 'utf8');
+  const taskSkill = readFileSync(join(ROOT_DIR, 'skills/task/SKILL.md'), 'utf8');
 
   assert.match(taskSkill, /changes the parent's plan/i);
   assert.match(taskSkill, /same turn/i);
