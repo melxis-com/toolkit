@@ -93,7 +93,7 @@ That's it. Depending on the client surface, Melxis can guide the agent to:
 
 ## Updating
 
-For github-referenced installs, Claude Code requires refreshing the marketplace cache before the new version is visible.
+Claude Code caches the marketplace, so a new version only becomes visible after you refresh it.
 
 | Platform | Update |
 |----------|--------|
@@ -198,6 +198,8 @@ For implementation-level details, see [SECURITY.md](SECURITY.md).
 
 | Symptom | Fix |
 |---------|-----|
+| Plugin install fails with `Permission denied (publickey)` (Claude Code) | Run `/plugin marketplace update melxis-com-toolkit`, then `/plugin install melxis@melxis-com-toolkit` — a cached entry can still resolve the plugin to an SSH clone. |
+| Plugin install still fails with `Permission denied (publickey)` after a marketplace refresh, and you have no SSH key on GitHub (Claude Code) | Set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`. It switches every plugin Claude Code installs to HTTPS, not only this one, so re-check any plugin you install from a private repository over SSH. |
 | Melxis tools do not appear | Restart the client session and confirm the platform-specific install step loaded the MCP config (Codex: check `/plugins`). |
 | Authentication, token, or connection errors | Reconnect or sign in to Melxis MCP again, then retry. On Codex CLI, run `codex mcp login melxis`. |
 | Context is not restored after `/clear` / resume (Codex) | Check `/plugins` and `/hooks` — plugin hooks stay blocked until approved, and approval is tied to the hook definitions, so updates that change them require re-approval. |

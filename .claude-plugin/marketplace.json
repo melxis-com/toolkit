@@ -12,11 +12,11 @@
     {
       "name": "melxis",
       "source": {
-        "source": "github",
-        "repo": "melxis-com/toolkit"
+        "source": "url",
+        "url": "https://github.com/melxis-com/toolkit.git"
       },
       "description": "Memory and tasks that feed each other — Mels capture decisions, Tasks track work, and completed Tasks return insights to Mels so the next agent picks up the thread",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "author": {
         "name": "Melxis",
         "email": "support@melxis.com"
