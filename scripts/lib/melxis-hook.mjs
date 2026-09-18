@@ -22,36 +22,42 @@ export function readStdinJson() {
 // directory. The harness contract has the transcript under ~/.claude/, but
 // guarding against tampered stdin / arbitrary file read keeps the script
 // honest with the README's transparency claims.
-export function readTranscriptTail(path, maxLines = 200) {
-  if (!path) return [];
+export function readTranscriptTail(path, maxLines = 200, { strict = false } = {}) {
+  // Recovery checks must distinguish an unreadable log from a readable empty
+  // session. Other best-effort consumers retain the existing empty fallback.
+  const unreadable = () => {
+    if (strict) throw new Error('Transcript unavailable or unreadable; recovery state is unknown');
+    return [];
+  };
+  if (!path) return unreadable();
   let resolved;
   let home;
   try {
     resolved = realpathSync(resolve(path));
     home = realpathSync(homedir());
   } catch {
-    return [];
+    return unreadable();
   }
-  if (!home || (resolved !== home && !resolved.startsWith(`${home}${sep}`))) return [];
+  if (!home || (resolved !== home && !resolved.startsWith(`${home}${sep}`))) return unreadable();
   try {
     statSync(resolved);
   } catch {
-    return [];
+    return unreadable();
   }
   let raw;
   try {
     raw = readFileSync(resolved, 'utf8');
   } catch {
-    return [];
+    return unreadable();
   }
   const lines = raw.split('\n').filter(Boolean);
   return lines.slice(-maxLines);
 }
 
 // Parse JSONL transcript entries into objects.
-// Each entry has shape { type, message: { role, content }, ... } per Claude Code's
-// transcript format. Defensive: silently skip lines that don't parse.
-export function parseTranscript(lines) {
+// Keep raw entries and their positions. Shared readers below adapt the host's
+// record shape, so callers that already have parsed entries behave identically.
+export function parseTranscript(lines, { strict = false } = {}) {
   const entries = [];
   for (const line of lines) {
     try {
@@ -59,6 +65,9 @@ export function parseTranscript(lines) {
     } catch {
       // skip malformed line
     }
+  }
+  if (strict && lines.length > 0 && entries.length === 0) {
+    throw new Error('Transcript contains no readable records; recovery state is unknown');
   }
   return entries;
 }
@@ -74,7 +83,7 @@ export function parseTranscript(lines) {
 export function extractText(entries) {
   const parts = [];
   for (const e of entries) {
-    const msg = e?.message;
+    const msg = normalizeTranscriptEntry(e)?.message;
     if (!msg) continue;
     const content = msg.content;
     if (typeof content === 'string') {
@@ -100,65 +109,118 @@ function parseMaybeJson(value) {
   }
 }
 
+// The script a shell was handed: ['/bin/zsh', '-lc', script] → script. The
+// checkpoint pattern anchors at the start of the command text, so the shell
+// prefix must not be part of it.
+function shellScriptOf(command) {
+  if (typeof command === 'string') return command;
+  if (!Array.isArray(command)) return '';
+  if (command.length >= 3 && /^-[A-Za-z]*c[A-Za-z]*$/.test(String(command[1]))) return String(command[2]);
+  return command.map(String).join(' ');
+}
+
+// Adapt Codex envelopes to the shapes already used by the shared readers.
+// Claude records pass through unchanged. Do not traverse result payloads or
+// evaluate code-mode source: nested MCP calls and shell commands have their
+// own completion events. Return one view per input entry to preserve all
+// boundary/checkpoint indexes.
+function normalizeTranscriptEntry(value) {
+  const entry = parseMaybeJson(value);
+  if (!entry || typeof entry !== 'object') return entry;
+  if (entry.type === 'response_item') {
+    const payload = entry.payload;
+    if (payload?.type === 'message') {
+      const kinds = payload.internal_chat_message_metadata_passthrough?.content_item_kinds;
+      if (payload.role === 'developer' && Array.isArray(kinds) && kinds.includes('hooks.additional_context')) {
+        return { type: 'hook_additional_context', content: payload.content };
+      }
+      if (payload.role !== 'user' && payload.role !== 'assistant') return null;
+      const content = Array.isArray(payload.content)
+        ? payload.content.map(c => c?.type === 'input_text' || c?.type === 'output_text'
+          ? { type: 'text', text: c.text } : c)
+        : payload.content;
+      return { message: { role: payload.role, content } };
+    }
+    if (payload?.type === 'function_call' || payload?.type === 'custom_tool_call') return payload;
+    return null;
+  }
+  if (entry.type === 'event_msg') {
+    if (entry.payload?.type !== 'item_completed') return null;
+    const item = entry.payload.item;
+    if (item?.type === 'McpToolCall') {
+      if (item.status !== 'completed' || !item.result || item.error || item.result?.isError === true) return null;
+      if (typeof item.server !== 'string' || typeof item.tool !== 'string') return null;
+      return { type: 'tool_use', name: `mcp__${item.server}__${item.tool}`, input: item.arguments };
+    }
+    if (item?.type === 'CommandExecution') {
+      // Codex runs shell commands through code-mode: the `exec` call carries
+      // JS source, and the command that actually ran arrives here. Codex marks
+      // a non-zero exit as status 'failed', so a completed item is a command
+      // that succeeded — the only kind that is a checkpoint (a rejected commit
+      // or push is not one). Observed on Codex CLI 0.154.0, 2026-09-18.
+      if (item.status !== 'completed' || (item.exit_code !== undefined && item.exit_code !== 0)) return null;
+      const cmd = shellScriptOf(item.command);
+      return cmd ? { type: 'tool_use', name: 'exec_command', input: { cmd } } : null;
+    }
+    return null;
+  }
+  return entry;
+}
+
+// Only call containers carry executable names. Arguments, tool results and
+// quoted JSON are data even when they contain name/input/tool_uses fields.
+// All tool-based heuristics use this reader rather than independent walkers.
+function collectToolCalls(value, results = []) {
+  const entry = normalizeTranscriptEntry(value);
+  if (!entry || typeof entry !== 'object') return results;
+  if (Array.isArray(entry)) {
+    for (const item of entry) collectToolCalls(item, results);
+    return results;
+  }
+  if (entry.message) {
+    if (!entry.message.role || entry.message.role === 'assistant') {
+      // Strings in messages are prose, never serialized calls.
+      if (Array.isArray(entry.message.content)) {
+        for (const block of entry.message.content) {
+          if (block && typeof block === 'object') collectToolCalls(block, results);
+        }
+      }
+    }
+    return results;
+  }
+  const callType = ['tool_use', 'function_call', 'custom_tool_call'].includes(entry.type);
+  if (entry.type && !callType) return results;
+  const name = entry.name ?? entry.tool_name ?? entry.recipient_name ?? entry.function?.name;
+  const input = parseMaybeJson(entry.input ?? entry.arguments ?? entry.parameters ?? entry.function?.arguments);
+  if (typeof name === 'string' && (callType || input !== undefined)) {
+    results.push({ name, input });
+    // Legacy multi-tool containers explicitly list calls; other tool inputs
+    // must not be searched recursively for things that resemble calls.
+    if (/^multi_tool_use[._]/.test(name) && Array.isArray(input?.tool_uses)) {
+      collectToolCalls(input.tool_uses, results);
+    }
+  } else if (Array.isArray(entry.tool_uses)) {
+    collectToolCalls(entry.tool_uses, results);
+  }
+  return results;
+}
+
 function isCommandToolName(value) {
   return /(^|[._-])(bash|exec_command|shell|terminal)([._-]|$)/i.test(String(value ?? ''));
 }
 
 function collectCommandToolInputs(value, results = []) {
-  if (!value || typeof value !== 'object') return results;
-
-  if (Array.isArray(value)) {
-    for (const item of value) collectCommandToolInputs(item, results);
-    return results;
-  }
-
-  const name = value.name ?? value.tool_name ?? value.recipient_name ?? value.function?.name;
-  const isCommandTool = isCommandToolName(name);
-  const input = parseMaybeJson(
-    value.input ?? value.arguments ?? value.parameters ?? value.function?.arguments,
-  );
-
-  if (isCommandTool) {
-    const cmd = input?.cmd ?? input?.command ?? value.cmd ?? value.command;
-    if (typeof cmd === 'string' && cmd.trim()) {
-      results.push(cmd);
+  for (const { name, input } of collectToolCalls(value)) {
+    if (isCommandToolName(name)) {
+      const cmd = input?.cmd ?? input?.command;
+      if (typeof cmd === 'string' && cmd.trim()) results.push(cmd);
     }
   }
-
-  // multi_tool_use nests individual calls under `tool_uses`; Claude/Codex
-  // transcripts may also nest function calls inside content arrays.
-  for (const child of Object.values(value)) {
-    if (child && typeof child === 'object') collectCommandToolInputs(parseMaybeJson(child), results);
-  }
-
   return results;
 }
 
 export function hasToolCallMatching(entries, pattern) {
-  const stack = Array.isArray(entries) ? [...entries] : [entries];
-  while (stack.length) {
-    const current = parseMaybeJson(stack.pop());
-    if (!current || typeof current !== 'object') continue;
-
-    if (Array.isArray(current)) {
-      stack.push(...current);
-      continue;
-    }
-
-    const names = [
-      current.name,
-      current.tool_name,
-      current.recipient_name,
-      current.function?.name,
-    ].filter(Boolean);
-    if (names.some((name) => pattern.test(String(name)))) return true;
-
-    for (const child of Object.values(current)) {
-      if (child && typeof child === 'object') stack.push(child);
-      else if (typeof child === 'string' && child.trim().startsWith('{')) stack.push(child);
-    }
-  }
-  return false;
+  return collectToolCalls(entries).some(({ name }) => pattern.test(name));
 }
 
 export function hasToolCallMatchingAfterIndex(entries, pattern, index) {
@@ -166,26 +228,17 @@ export function hasToolCallMatchingAfterIndex(entries, pattern, index) {
   return hasToolCallMatching(entries.slice(start), pattern);
 }
 
-// Scans raw entries (stringified) for a text marker and returns the index of
-// the last entry containing it, or -1. Entry shapes vary across clients and
-// hook events (`hook_additional_context`, `hook_success`, message content
-// arrays), so a raw scan is more robust than extractText, which only walks
-// assistant/user message text.
-const HOOK_TYPE_RE = /"type"\s*:\s*"hook_/;
+// Scan adapted entries for a marker while keeping original entry indexes.
+// hookOnly requires a real hook record, not a quote inside text or tool data.
 
 export function findLastEntryIndexMatching(entries, pattern, options = {}) {
   if (!Array.isArray(entries)) return -1;
   const hookOnly = options.hookOnly === true;
   for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
+    const entry = normalizeTranscriptEntry(entries[i]);
     let raw;
     if (entry && typeof entry === 'object') {
-      // hookOnly: hook emissions are recorded with a "hook_*" entry type
-      // (hook_success / hook_additional_context). Marker text inside tool
-      // traffic or assistant prose (e.g. quoting these templates while
-      // developing the toolkit) must not count as a boundary or prior nag.
-      // The type check also skips stringifying large non-hook entries.
-      if (hookOnly && typeof entry.type === 'string' && !entry.type.startsWith('hook_')) {
+      if (hookOnly && !(typeof entry.type === 'string' && entry.type.startsWith('hook_'))) {
         continue;
       }
       try {
@@ -193,10 +246,9 @@ export function findLastEntryIndexMatching(entries, pattern, options = {}) {
       } catch {
         continue;
       }
-      if (hookOnly && typeof entry.type !== 'string' && !HOOK_TYPE_RE.test(raw)) continue;
     } else if (typeof entry === 'string') {
+      if (hookOnly) continue;
       raw = entry;
-      if (hookOnly && !HOOK_TYPE_RE.test(raw)) continue;
     } else {
       continue;
     }
@@ -224,13 +276,18 @@ export function countEntriesMatchingAfterIndex(entries, pattern, index, options 
 // description edits) and task_create (anchoring new work IS reflecting it).
 // Counting only task_update made compliant patch-first sessions look
 // non-compliant, so the reminder fired right after the progress had been
-// written (observed dogfood 2026-07-30).
+// written (observed dogfood 2026-07-30). task_note counts too: a finding,
+// question or blocker appended to the timeline is progress reflected in
+// Melxis, and the reminder that follows would ask for exactly that write.
+// A note-only session can leave the description stale; that is recovered on
+// the next resume path, where every SessionStart block reads the timeline
+// first and then refreshes the compressed current state.
 export function hasTaskWriteAfterIndex(entries, index) {
   if (!Array.isArray(entries)) return false;
   const start = Math.max(0, index + 1);
   return hasToolCallMatching(
     entries.slice(start),
-    /(?:^|[._-])task_(?:update|patch|create)(?:[._-]|$)/,
+    /(?:^|[._-])task_(?:update|patch|create|note)(?:[._-]|$)/,
   );
 }
 
@@ -252,7 +309,7 @@ export const SESSION_BOUNDARY_TEXT_RE =
 export function findTurnStartIndex(entries, index) {
   if (!Array.isArray(entries) || index < 0) return index;
   for (let i = Math.min(index, entries.length - 1); i >= 0; i--) {
-    const entry = entries[i];
+    const entry = normalizeTranscriptEntry(entries[i]);
     if (!entry || typeof entry !== 'object') continue;
     if (typeof entry.type === 'string' && entry.type.startsWith('hook_')) {
       // A session boundary (startup / resume / compaction block) ends the
@@ -289,7 +346,7 @@ export function findTurnStartIndex(entries, index) {
 // Mirrors extractText's content-walking but scoped to one entry so we can
 // pinpoint the position of the latest matching signal.
 function entryTextMatchesPattern(entry, pattern) {
-  const msg = entry?.message;
+  const msg = normalizeTranscriptEntry(entry)?.message;
   if (!msg) return false;
   const content = msg.content;
   if (typeof content === 'string') return pattern.test(content);
@@ -299,70 +356,6 @@ function entryTextMatchesPattern(entry, pattern) {
       if (c && typeof c === 'object' && typeof c.text === 'string' && pattern.test(c.text)) {
         return true;
       }
-    }
-  }
-  return false;
-}
-
-// Detect a task write whose input sets status to completed or cancelled.
-// The closure signal is the status transition itself, not the tool that
-// carried it: task_patch accepts an optional status, so closing rides
-// either tool (same asymmetry class as the write matcher — a tool gaining a
-// capability must reach every regex that models the lifecycle).
-function entryHasTaskClosureToolUse(entry) {
-  if (!entry || typeof entry !== 'object') return false;
-  const stack = [entry];
-  while (stack.length) {
-    const current = parseMaybeJson(stack.pop());
-    if (!current || typeof current !== 'object') continue;
-
-    if (Array.isArray(current)) {
-      stack.push(...current);
-      continue;
-    }
-
-    const name = current.name ?? current.tool_name ?? current.recipient_name ?? current.function?.name;
-    if (typeof name === 'string' && /(?:^|[._-])task_(?:update|patch)(?:[._-]|$)/.test(name)) {
-      const input = parseMaybeJson(
-        current.input ?? current.arguments ?? current.parameters ?? current.function?.arguments,
-      );
-      const status = input && typeof input === 'object' ? input.status : undefined;
-      if (status === 'completed' || status === 'cancelled') return true;
-    }
-
-    for (const child of Object.values(current)) {
-      if (child && typeof child === 'object') stack.push(child);
-      else if (typeof child === 'string' && child.trim().startsWith('{')) stack.push(child);
-    }
-  }
-  return false;
-}
-
-function entryHasTaskRelatedMelUpdate(entry) {
-  if (!entry || typeof entry !== 'object') return false;
-  const stack = [entry];
-  while (stack.length) {
-    const current = parseMaybeJson(stack.pop());
-    if (!current || typeof current !== 'object') continue;
-
-    if (Array.isArray(current)) {
-      stack.push(...current);
-      continue;
-    }
-
-    const name = current.name ?? current.tool_name ?? current.recipient_name ?? current.function?.name;
-    if (typeof name === 'string' && /(?:^|[._-])task_update(?:[._-]|$)/.test(name)) {
-      const input = parseMaybeJson(
-        current.input ?? current.arguments ?? current.parameters ?? current.function?.arguments,
-      );
-      if (input && typeof input === 'object' && Array.isArray(input.related_mel_ids)) {
-        return true;
-      }
-    }
-
-    for (const child of Object.values(current)) {
-      if (child && typeof child === 'object') stack.push(child);
-      else if (typeof child === 'string' && child.trim().startsWith('{')) stack.push(child);
     }
   }
   return false;
@@ -425,7 +418,7 @@ export function hasTaskLikeContext(entries) {
       // task_patch included: a session editing a task description is task
       // context as much as one updating it (same omission as the write
       // matcher, observed dogfood 2026-07-30).
-      /(?:^|[._-])(?:task_search|task_get|task_create|task_update|task_patch)(?:[._-]|$)/,
+      /(?:^|[._-])(?:task_search|task_get|task_create|task_update|task_patch|task_note)(?:[._-]|$)/,
     )
   ) {
     return true;
@@ -481,37 +474,19 @@ export function hasActiveMelxisTask(entries) {
 // entries are rare in practice.
 function findTaskTransitions(entry) {
   const out = [];
-  if (!entry || typeof entry !== 'object') return out;
-  const stack = [entry];
-  while (stack.length) {
-    const current = parseMaybeJson(stack.pop());
-    if (!current || typeof current !== 'object') continue;
-    if (Array.isArray(current)) {
-      stack.push(...current);
-      continue;
-    }
-    const name = current.name ?? current.tool_name ?? current.recipient_name ?? current.function?.name;
-    if (typeof name === 'string') {
-      const isCreate = /(?:^|[._-])task_create(?:[._-]|$)/.test(name);
-      const isStatusWrite = /(?:^|[._-])task_(?:update|patch)(?:[._-]|$)/.test(name);
-      if (isCreate || isStatusWrite) {
-        const input = parseMaybeJson(
-          current.input ?? current.arguments ?? current.parameters ?? current.function?.arguments,
-        );
-        const status = input && typeof input === 'object' ? input.status : undefined;
-        if (isCreate) {
-          // task_create may omit status (defaults to in_progress per Melxis convention)
-          if (status === undefined || status === 'in_progress') out.push('open');
-          else if (status === 'completed' || status === 'cancelled') out.push('close');
-        } else if (isStatusWrite) {
-          if (status === 'in_progress') out.push('open');
-          else if (status === 'completed' || status === 'cancelled') out.push('close');
-        }
+  for (const { name, input } of collectToolCalls(entry)) {
+    const isCreate = /(?:^|[._-])task_create(?:[._-]|$)/.test(name);
+    const isStatusWrite = /(?:^|[._-])task_(?:update|patch)(?:[._-]|$)/.test(name);
+    if (isCreate || isStatusWrite) {
+      const status = input && typeof input === 'object' ? input.status : undefined;
+      if (isCreate) {
+        // task_create may omit status (defaults to in_progress per Melxis convention)
+        if (status === undefined || status === 'in_progress') out.push('open');
+        else if (status === 'completed' || status === 'cancelled') out.push('close');
+      } else if (isStatusWrite) {
+        if (status === 'in_progress') out.push('open');
+        else if (status === 'completed' || status === 'cancelled') out.push('close');
       }
-    }
-    for (const child of Object.values(current)) {
-      if (child && typeof child === 'object') stack.push(child);
-      else if (typeof child === 'string' && child.trim().startsWith('{')) stack.push(child);
     }
   }
   return out;

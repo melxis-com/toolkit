@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 import { hasActiveMelxisTask } from './melxis-hook.mjs';
 import {
@@ -20,6 +20,20 @@ function toolUseEntry(name, input) {
 
 function textEntry(role, text) {
   return { message: { role, content: text } };
+}
+
+function runWithEmptyTranscript(prompt) {
+  const dir = mkdtempSync(resolve(process.cwd(), '.tmp-prompt-hook-'));
+  try {
+    const path = join(dir, 'transcript.jsonl');
+    writeFileSync(path, '');
+    return spawnSync(process.execPath, ['scripts/on_user_prompt_submit.mjs'], {
+      cwd: new URL('../..', import.meta.url), encoding: 'utf8',
+      input: JSON.stringify({ prompt, transcript_path: path }),
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // --- hasActiveMelxisTask --------------------------------------------------
@@ -228,6 +242,22 @@ test('shouldInjectCheckpointRecovery: task_patch counts as reflecting progress',
   assert.equal(result.reason, 'task-write-after-checkpoint');
 });
 
+test('shouldInjectCheckpointRecovery: task_note counts as reflecting progress', () => {
+  // task_note appends the progress to the task timeline. hasTaskWriteAfterIndex
+  // already counts it in its unit test; this pins the end-to-end decision so a
+  // later branch in shouldInjectCheckpointRecovery cannot skip note-only turns
+  // while update / patch still suppress.
+  const result = shouldInjectCheckpointRecovery({
+    entries: [
+      textEntry('assistant', 'implemented the task current state refresh and tested it'),
+      toolUseEntry('functions.exec_command', { cmd: 'git commit -m "checkpoint"' }),
+      toolUseEntry('mcp__plugin_melxis_melxis__task_note', { id: 't1', kind: 'note', content: 'checkpoint committed' }),
+    ],
+  });
+  assert.equal(result.inject, false);
+  assert.equal(result.reason, 'task-write-after-checkpoint');
+});
+
 test('shouldInjectCheckpointRecovery: a write earlier in the same turn suppresses', () => {
   // Real turns write first and narrate last. The write at entry 1 precedes the
   // closing progress prose at entry 3, but both belong to the turn opened by
@@ -321,14 +351,7 @@ test('buildAdditionalContext: includes checkpoint recovery before next turn', ()
 // --- executable output contract ------------------------------------------
 
 test('main hook emits UserPromptSubmit additionalContext JSON', () => {
-  const child = spawnSync(process.execPath, ['scripts/on_user_prompt_submit.mjs'], {
-    cwd: new URL('../..', import.meta.url),
-    input: JSON.stringify({
-      prompt: 'この WebSocket バグを調査して修正してほしい',
-      transcript_path: '',
-    }),
-    encoding: 'utf8',
-  });
+  const child = runWithEmptyTranscript('この WebSocket バグを調査して修正してほしい');
 
   assert.equal(child.status, 0);
   assert.equal(child.stderr, '');
@@ -341,14 +364,7 @@ test('main hook emits UserPromptSubmit additionalContext JSON', () => {
 });
 
 test('main hook emits bootstrap JSON for cleared-context prompt', () => {
-  const child = spawnSync(process.execPath, ['scripts/on_user_prompt_submit.mjs'], {
-    cwd: new URL('../..', import.meta.url),
-    input: JSON.stringify({
-      prompt: '今日は良い天気ですか？',
-      transcript_path: '',
-    }),
-    encoding: 'utf8',
-  });
+  const child = runWithEmptyTranscript('今日は良い天気ですか？');
 
   assert.equal(child.status, 0);
   assert.equal(child.stderr, '');
@@ -846,4 +862,16 @@ test('hasMelxisContext: similarly named tools from other MCP servers are not cou
       `${toolName} was wrongly detected as a Melxis tool`,
     );
   }
+});
+
+// task_note is a write with the generic `task_` prefix, so it follows the same
+// rule as the other task_* names: counted with the melxis marker or as the
+// exact bare name, never under another server's prefix. Missing it here means
+// a session whose only Melxis call so far was a note reads as "never
+// recovered" and gets the bootstrap reminder again.
+test('hasMelxisContext: task_note counts as Melxis context under the same rule as other task_* names', () => {
+  for (const toolName of ['task_note', 'mcp__plugin_melxis_melxis__task_note', 'mcp__melxis__task_note']) {
+    assert.ok(hasMelxisContext([toolUseEntry(toolName, {})]), `${toolName} was not detected`);
+  }
+  assert.equal(hasMelxisContext([toolUseEntry('mcp__linear__task_note', {})]), false);
 });

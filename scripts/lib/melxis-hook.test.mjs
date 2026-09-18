@@ -127,7 +127,7 @@ test('hasTaskWriteAfterIndex only counts task writes after the checkpoint', () =
   assert.equal(hasTaskWriteAfterIndex(entries, -1), true);
 });
 
-test('hasTaskWriteAfterIndex counts task_patch and task_create, not task reads', () => {
+test('hasTaskWriteAfterIndex counts task_patch, task_create and task_note, not task reads', () => {
   // The product steers agents toward task_patch for localized description
   // edits; counting only task_update made compliant sessions look
   // non-compliant and the reminder fired right after the write.
@@ -137,6 +137,15 @@ test('hasTaskWriteAfterIndex counts task_patch and task_create, not task reads',
   );
   assert.equal(
     hasTaskWriteAfterIndex([toolUseEntry('mcp__melxis__.task_create', { title: 'anchor' })], -1),
+    true,
+  );
+  // task_note appends to the timeline: progress reflected in Melxis, so the
+  // checkpoint reminder that would ask for exactly that write stays quiet.
+  assert.equal(
+    hasTaskWriteAfterIndex(
+      [toolUseEntry('mcp__plugin_melxis_melxis__task_note', { id: 't1', kind: 'note', content: 'x' })],
+      -1,
+    ),
     true,
   );
   assert.equal(

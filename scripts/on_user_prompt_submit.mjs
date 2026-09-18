@@ -61,7 +61,7 @@ Skip task anchoring only if the work is genuinely trivial (typo, single-line fix
 // wording by scripts/lib/client-surface-language.test.mjs. Edit them here too.
 const BOOTSTRAP_TEMPLATE = `[melxis] Recent transcript context does not show Melxis context recovery.
 
-Before answering the user's prompt, run the atomic Melxis recovery flow: call \`hive_search(query: "<inferred project name>")\` first — it gives \`own\` / \`owner_account_id\` per hive; identify hives by id + \`own\`, never by name (names collide across accounts). Infer the project name from local project context without exposing raw local details. Resolve the project's hive set — one own anchor hive (\`own: true\`) plus any shared hives (\`own: false\`, read-only mels). Then — only if an own anchor hive is resolved — call \`hive_context_get(hive_id: "<own anchor hive id>")\` for one read returning the hive guide (what belongs in this hive, where each kind of thing goes, and how to work in it; follow it for the rest of the session, where it takes precedence over your default habits — though an explicit user instruction in the conversation always overrides it) together with the mels it points at, followed by \`task_search(hive_id: "<own anchor hive id>", sort: "recency", limit: 10)\` without \`parent_task_id\` for handoff recovery. Both are own-hive only — tasks are private to each account, so shared hives have none; with no own anchor, operate in shared-only mode and skip both \`hive_context_get\` and task recovery. When a clear project has no fitting own hive (or you own none at all), propose creating one at the first save-worthy mel or task with \`hive_create\` — suggest a name (the project's own, e.g. the repo) and a one-line description; hive creation asks the user even under auto write policy — then write its first guide with \`guide_edit\` from the purpose the user just stated. A stray note that belongs to no project goes to the Default hive, the fallback inbox every account starts with (an argless \`hive_search\` lists every hive you can reach; \`own\` tells yours apart), not a project's home. If unresolved/ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered hive guide, handoff task context, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks) as a compact session brief; keep working recall blended (leave \`hive_ids\` / \`owner_account_ids\` unset in \`mel_search\`).
+Before answering the user's prompt, run the atomic Melxis recovery flow: call \`hive_search(query: "<inferred project name>")\` first — it gives \`own\` / \`owner_account_id\` per hive; identify hives by id + \`own\`, never by name (names collide across accounts). Infer the project name from local project context without exposing raw local details. Resolve the project's hive set — one own anchor hive (\`own: true\`) plus any shared hives (\`own: false\`, read-only mels). Then — only if an own anchor hive is resolved — call \`hive_context_get(hive_id: "<own anchor hive id>")\` for one read returning the hive guide (what belongs in this hive, where each kind of thing goes, and how to work in it; follow it for the rest of the session, where it takes precedence over your default habits — though an explicit user instruction in the conversation always overrides it) together with the mels it points at, followed by \`task_search(hive_id: "<own anchor hive id>", sort: "recency", limit: 10)\` without \`parent_task_id\` for handoff recovery. Both are own-hive only — tasks are private to each account, so shared hives have none; with no own anchor, operate in shared-only mode and skip both \`hive_context_get\` and task recovery. When a clear project has no fitting own hive (or you own none at all), propose creating one at the first save-worthy mel or task with \`hive_create\` — suggest a name (the project's own, e.g. the repo) and a one-line description; hive creation asks the user even under auto write policy — then write its first guide with \`guide_edit\` from the purpose the user just stated. A stray note that belongs to no project goes to the Default hive, the fallback inbox every account starts with (an argless \`hive_search\` lists every hive you can reach; \`own\` tells yours apart), not a project's home. For the task you resume, \`task_get\` returns its \`timeline\` — the events since the description was last compressed — so read it before acting. If unresolved/ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered hive guide, handoff task context, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks) as a compact session brief; keep working recall blended (leave \`hive_ids\` / \`owner_account_ids\` unset in \`mel_search\`).
 
 This is a lightweight recovery path for cleared/compacted context. Do not create or update memory from this reminder alone. Routine Melxis bookkeeping stays silent; report MCP availability/auth/token/connection failures.
 `;
@@ -70,6 +70,7 @@ const CHECKPOINT_RECOVERY_TEMPLATE = `[melxis] Recent transcript suggests task-l
 
 Before substantive work, silently refresh the active/relevant task if needed:
 - Update the parent task description as compressed current state, not append-only history.
+- A finding, an open question or a blocker from the work so far goes to \`task_note\` as one entry per event (kind note / question / blocker) — not into the description; a note written now about something earlier gets the current \`created_at\`, so say in its content when it happened. An entry that will still matter after the task closes becomes a mel now, not at closure.
 - Update status, priority, tags, and related_mel_ids when the current state changed.
 - Keep the parent task as goal / why / Definition of Done; create or update sub-tasks for independently resumable remaining work with separate completion criteria.
 - Do not create sub-tasks for ephemeral same-turn steps.
@@ -124,7 +125,7 @@ export function shouldInjectDirective({ prompt, entries }) {
 // reminder, already capped per boundary. So the generic names are accepted
 // only with the "melxis" marker present or as an exact bare-MCP tool name.
 const MELXIS_TOOL_RE =
-  /melxis|(?:^|[._-])(?:mel_(?:search|get|create|update|patch|delete|link_create|link_delete)|hive_(?:search|create|update|context_get))(?:[._-]|$)|^(?:task_(?:search|get|create|update|patch|delete)|guide_(?:get|edit|patch)|next_actions)$/i;
+  /melxis|(?:^|[._-])(?:mel_(?:search|get|create|update|patch|delete|link_create|link_delete)|hive_(?:search|create|update|context_get))(?:[._-]|$)|^(?:task_(?:search|get|create|update|patch|delete|note)|guide_(?:get|edit|patch)|next_actions)$/i;
 
 // Session boundary = our own SessionStart hook output recorded in the
 // transcript (entry types vary by client: hook_success / hook_additional_context).
@@ -145,8 +146,8 @@ const CHECKPOINT_NAG_BUDGET = 2;
 // literal marker strings also appear in tool_result / tool_use entries when
 // this toolkit's own sources are read or edited, and in assistant prose that
 // quotes the templates — systematically, in exactly the sessions that
-// develop the toolkit. Only hook_success / hook_additional_context entries
-// are authoritative for boundaries and prior nags.
+// develop the toolkit. The shared reader recognizes Claude hook records and
+// Codex developer messages explicitly marked as hooks.additional_context.
 
 export function hasMelxisContext(entries) {
   if (!Array.isArray(entries) || entries.length === 0) return false;
@@ -306,8 +307,10 @@ if (isMain) {
     // the prior-nag records from the window — the per-boundary nag budget then
     // resets every prompt and the reminder fires forever (observed dogfood
     // 2026-07-30). Reading a longer tail costs milliseconds.
-    const lines = readTranscriptTail(transcriptPath, 800);
-    const entries = parseTranscript(lines);
+    // An unavailable or malformed transcript is not an empty new session.
+    // Let the existing catch report it without injecting an ungrounded nag.
+    const lines = readTranscriptTail(transcriptPath, 800, { strict: true });
+    const entries = parseTranscript(lines, { strict: true });
     const additionalContext = buildAdditionalContext({ prompt, entries });
     if (additionalContext) {
       process.stdout.write(

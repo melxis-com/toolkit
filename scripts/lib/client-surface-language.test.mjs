@@ -815,3 +815,220 @@ test('melxis-task sends plan-changing sub-task decisions back to the parent', ()
   assert.match(taskSkill, /changes the parent's plan/i);
   assert.match(taskSkill, /same turn/i);
 });
+
+// --- the task timeline: task_note in, timeline out --------------------------
+//
+// The server now keeps a task's own history (state changes it writes itself,
+// plus note / question / blocker entries from task_note) and returns it from
+// task_get as `timeline`. Agents reach the server only through these surfaces,
+// so a face the surfaces never name is a face no session uses: without the
+// routing line, mid-task findings keep landing in the description (which the
+// "compressed current state" rule then has to fight), and closure keeps
+// extracting from the conversation alone while the trace it should read sits
+// unread on the task.
+test('task surfaces route mid-task events to task_note and read the timeline at closure', () => {
+  const taskSkill = readFileSync(join(ROOT_DIR, 'skills/task/SKILL.md'), 'utf8');
+  const memorySkill = readFileSync(join(ROOT_DIR, 'skills/memory/SKILL.md'), 'utf8');
+  const agents = readFileSync(join(ROOT_DIR, 'AGENTS.md'), 'utf8');
+
+  for (const [file, text] of [
+    ['skills/task/SKILL.md', taskSkill],
+    ['skills/memory/SKILL.md', memorySkill],
+    ['AGENTS.md', agents],
+  ]) {
+    assert.match(text, /`task_note`/, `${file}: never names task_note`);
+    assert.match(text, /`timeline`/, `${file}: never names the timeline`);
+    // the three kinds, in the server's own words
+    assert.match(text, /note \/ question \/ blocker/, `${file}: does not list the three kinds`);
+    // one entry per event — the rule that keeps the timeline readable
+    assert.match(text, /one entry per event/i, `${file}: lost the one-entry-per-event rule`);
+    // a decision is a mel, never a note: the routing that keeps notes from
+    // becoming a second, unsearchable memory
+    assert.match(text, /decision[^.\n]*is a mel/i, `${file}: does not route decisions to mels`);
+  }
+
+  // Closure reads the timeline before extracting; both prose surfaces that
+  // describe closure say so.
+  assert.match(taskSkill, /read the task's `timeline` via `task_get` first/i);
+  assert.match(memorySkill, /Read the task's `timeline` via `task_get` first/i);
+  assert.match(agents, /read the task's `timeline` via `task_get` first/i);
+
+  // The description rule survives — the timeline is where the trace goes so
+  // that the description can stay compressed, not a licence to log in both.
+  assert.match(taskSkill, /compressed current state, not logs/i);
+});
+
+// The hook blocks are what a session sees even when no skill is loaded, so the
+// reflex has to be there too — once in the rules pointer that reaches every
+// SessionStart path, and once in the checkpoint reminder, which is the moment
+// an agent is being asked to reflect progress and would otherwise stuff it
+// into the description.
+test('hook blocks carry the task_note reflex and the timeline read', () => {
+  const sessionStart = readFileSync(join(ROOT_DIR, 'scripts/on_session_start.mjs'), 'utf8');
+  const userPrompt = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
+
+  const pointer = hookBlock(sessionStart, 'RULES_POINTER_BLOCK');
+  assert.match(pointer, /task_note/);
+  assert.match(pointer, /note \/ question \/ blocker/);
+  assert.match(pointer, /Before closing a task, read its \\`timeline\\`/);
+
+  // Every resume path reads the timeline: the description alone says where the
+  // work stands, the timeline says how it got there.
+  for (const block of ['STARTUP_BLOCK', 'RESUME_BLOCK', 'COMPACT_BLOCK']) {
+    assert.match(hookBlock(sessionStart, block), /\\`timeline\\`/, `${block} does not read the timeline`);
+  }
+  assert.match(hookBlock(userPrompt, 'BOOTSTRAP_TEMPLATE'), /\\`timeline\\`/);
+  assert.match(hookBlock(userPrompt, 'CHECKPOINT_RECOVERY_TEMPLATE'), /task_note/);
+
+  // The closure hook is the one an agent actually sees at the moment of
+  // closing, so the timeline read has to be there too, and first.
+  const completed = readFileSync(join(ROOT_DIR, 'scripts/on_task_completed.mjs'), 'utf8');
+  assert.match(completed, /Read the task's \\`timeline\\` via \\`task_get\\` first/);
+
+  // The mel that closure extracts links to the task's related mels — a task is
+  // not a link endpoint, and a surface that says "link it to the task" hands
+  // the agent a call that cannot succeed.
+  for (const file of ['skills/task/SKILL.md', 'skills/memory/SKILL.md', 'AGENTS.md']) {
+    const text = readFileSync(join(ROOT_DIR, file), 'utf8');
+    assert.doesNotMatch(text, /[Ll]ink (?:task-derived memory |it )?(?:back )?to the (?:source )?task with/, `${file}: links a mel to a task`);
+    assert.match(text, /related mels[^.\n]*extracted-from-task|extracted-from-task[^.\n]*related mels/, `${file}: extracted-from-task has no mel target`);
+  }
+});
+
+// task_search can narrow by period (created_* / updated_*). "What were we
+// doing last week" is answered by that filter, not by scanning descriptions —
+// the skill has to name it or the agent falls back to the scan.
+test('melxis-task names the period filters of task_search', () => {
+  const taskSkill = readFileSync(join(ROOT_DIR, 'skills/task/SKILL.md'), 'utf8');
+
+  assert.match(taskSkill, /`created_after` \/ `created_before`/);
+  assert.match(taskSkill, /`updated_after` \/ `updated_before`/);
+  assert.match(taskSkill, /ISO 8601/);
+});
+
+// --- skills do not point at AGENTS.md -------------------------------------
+//
+// AGENTS.md is a template: Codex reads it only when a user copies it to where
+// project instructions are loaded, and Claude Code never reads it at all. A
+// skill that says "see AGENTS.md §…" sends every plugin install to a section
+// the agent cannot open. Whatever a skill needs from that file, it states
+// itself.
+test('skills state their rules inline instead of pointing at AGENTS.md sections', () => {
+  for (const file of ['skills/memory/SKILL.md', 'skills/task/SKILL.md']) {
+    const text = readFileSync(join(ROOT_DIR, file), 'utf8');
+    assert.doesNotMatch(text, /AGENTS\.md/, `${file}: still points at AGENTS.md`);
+    // the rule the pointer used to stand in for is now stated in place
+    assert.match(text, /Routine successful Melxis reads and writes are operational bookkeeping/);
+  }
+});
+
+// --- SKILL.md frontmatter: two length rules, and where triggers live --------
+//
+// Two hosts read the frontmatter with different rules (verified 2026-09-08
+// against the Agent Skills spec, Claude Code 2.1.263 and Codex CLI 0.153.4):
+//
+// - The Agent Skills spec caps `description` alone at 1024 characters, and
+//   Codex CLI refuses to load a skill over it (openai/codex#13941). Codex reads
+//   only name / description / metadata.short_description — `when_to_use` never
+//   reaches its model — so every trigger the skill needs on Codex has to be in
+//   the description itself.
+// - Claude Code lists each skill as `${description} - ${when_to_use}` and cuts
+//   that one string at skillListingMaxDescChars (default 1536). when_to_use is
+//   its own extension: extra detail for Claude Code, never the only home of a
+//   trigger.
+//
+// A single "description + when_to_use <= 1024" check conflated the two and
+// trimmed triggers that were within both real limits.
+
+const SPEC_DESCRIPTION_MAX = 1024;
+const CLAUDE_CODE_LISTING_MAX = 1536;
+
+// The frontmatter is YAML. A value wrapped in single quotes doubles its inner
+// apostrophes, and the length rules below apply to the text a host sees, not
+// to the quoting. Double quotes are refused rather than half-decoded: their
+// \n / \uXXXX escapes would be measured raw, and single quotes cover every
+// value here.
+function unquote(value) {
+  if (/^'[\s\S]*'$/.test(value)) return value.slice(1, -1).replace(/''/g, "'");
+  if (/^"[\s\S]*"$/.test(value)) {
+    throw new Error('double-quoted front matter is not supported by this reader; use single quotes');
+  }
+  return value;
+}
+
+function frontmatterBlock(file) {
+  const text = readFileSync(join(ROOT_DIR, file), 'utf8');
+  const block = /^---\n([\s\S]+?)\n---/.exec(text);
+  assert.ok(block, `${file}: no frontmatter`);
+  return block[1];
+}
+
+function frontmatter(file) {
+  const block = frontmatterBlock(file);
+  const field = (name) => {
+    const m = new RegExp(`^${name}:\\s*([\\s\\S]+?)(?=\\n[a-z_]+:|$)`, 'm').exec(block);
+    return m ? unquote(m[1].trim()) : '';
+  };
+  return { description: field('description'), whenToUse: field('when_to_use') };
+}
+
+const SKILLS = ['skills/memory/SKILL.md', 'skills/task/SKILL.md'];
+
+// A plain (unquoted) YAML scalar cannot contain ": " — the parser reads it as
+// a nested mapping and rejects the whole frontmatter (js-yaml, Psych and
+// eemeli/yaml all fail; observed 2026-09-18 when the task description gained
+// "hives (namespaces): plans"). The regex reader above never notices, so this
+// pins the rule: a value that carries ": " must be quoted. Every field is one
+// line today; a block scalar would need its continuation lines checked too.
+test('frontmatter scalars that contain ": " are quoted', () => {
+  for (const file of SKILLS) {
+    for (const line of frontmatterBlock(file).split('\n')) {
+      const m = /^([a-z_]+):\s*(.*)$/.exec(line);
+      if (!m) continue;
+      const quoted = /^(['"])[\s\S]*\1$/.test(m[2]);
+      assert.ok(quoted || !m[2].includes(': '), `${file}: ${m[1]} is an unquoted scalar containing ": "`);
+    }
+  }
+});
+
+test('skill descriptions stay within the spec cap, in characters and in bytes', () => {
+  for (const file of SKILLS) {
+    const { description } = frontmatter(file);
+    assert.ok(description.length > 0, `${file}: empty description`);
+    assert.ok(
+      description.length <= SPEC_DESCRIPTION_MAX,
+      `${file}: description is ${description.length} chars (spec max ${SPEC_DESCRIPTION_MAX})`,
+    );
+    // Byte length too: a Rust `.len()` counts bytes, and the descriptions carry
+    // Japanese trigger phrases (openai/codex#7730).
+    const bytes = Buffer.byteLength(description);
+    assert.ok(bytes <= SPEC_DESCRIPTION_MAX, `${file}: description is ${bytes} bytes`);
+  }
+});
+
+test('the Claude Code listing line (description - when_to_use) fits the default cap', () => {
+  for (const file of SKILLS) {
+    const { description, whenToUse } = frontmatter(file);
+    const line = whenToUse ? `${description} - ${whenToUse}` : description;
+    assert.ok(
+      line.length <= CLAUDE_CODE_LISTING_MAX,
+      `${file}: listing line is ${line.length} chars (cap ${CLAUDE_CODE_LISTING_MAX})`,
+    );
+  }
+});
+
+// The triggers a host must see live in the description; when_to_use may
+// repeat or extend them but never carries one alone.
+test('skill triggers live in the description, not only in when_to_use', () => {
+  const { description: task } = frontmatter('skills/task/SKILL.md');
+  assert.match(task, /task_note/);
+  assert.match(task, /timeline/);
+  assert.match(task, /period filters|created_after|updated_after/);
+  assert.match(task, /残っているタスク/);
+  assert.match(task, /手順を作る/);
+
+  const { description: memory } = frontmatter('skills/memory/SKILL.md');
+  assert.match(memory, /why did we choose/);
+  assert.match(memory, /前回/);
+  assert.match(memory, /how work should be done in a hive/);
+});
