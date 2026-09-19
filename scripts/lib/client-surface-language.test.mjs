@@ -1032,3 +1032,58 @@ test('skill triggers live in the description, not only in when_to_use', () => {
   assert.match(memory, /前回/);
   assert.match(memory, /how work should be done in a hive/);
 });
+
+// `task_get` returns the newest N of a task's whole history — it does not
+// start at the last description rewrite. A surface that says otherwise makes
+// an agent read entries already folded into the description as if they were
+// still live, and the same repo says it correctly elsewhere, so the drift is
+// between faces rather than against the server alone.
+test('no surface ties the timeline to the last description compression', () => {
+  for (const { file, text } of readSurface()) {
+    assert.doesNotMatch(
+      text,
+      /since (?:its|the) description was last compressed/,
+      `${file}: describes the timeline as starting at the last compression`,
+    );
+  }
+});
+
+// 200 is the ceiling and there is no cursor past it, so "re-read with
+// timeline_limit" on its own reads as a promise that the whole trace can be
+// recovered. Every face that offers the retry has to carry what happens when
+// it is still truncated, or closure reports a partial trace as a whole one.
+test('every timeline_limit retry names the 200 ceiling', () => {
+  for (const { file, text } of readSurface()) {
+    if (!/timeline_limit/.test(text)) continue;
+    assert.match(
+      text,
+      /ceiling|out of reach|cannot be read back/,
+      `${file}: offers the timeline_limit retry without naming the 200 ceiling`,
+    );
+  }
+});
+
+// The closure hook fires whether or not a skill is loaded, so the rules that
+// decide what happens to an unfinished question or blocker have to be in it —
+// an entry with nothing closing it is still open, and it is a task, not a mel.
+test('the closure hook routes a still-open question or blocker', () => {
+  const completed = readFileSync(join(ROOT_DIR, 'scripts/on_task_completed.mjs'), 'utf8');
+  assert.match(completed, /open in the timeline|left open/);
+  assert.match(completed, /sub-task or a verification task/);
+  assert.match(completed, /silence does not mean resolved/);
+});
+
+// An unconditional "link it to the task's related mels" reads as a fan-out
+// across every related mel, which contradicts the repo's own rule that a link
+// you cannot articulate is worse than none. Each face that names the reason
+// has to carry the filter with it.
+test('extracted-from-task carries a link-quality filter on every face', () => {
+  for (const { file, text } of readSurface()) {
+    if (!/extracted-from-task/.test(text)) continue;
+    assert.match(
+      text,
+      /actually bears on|cannot justify in a sentence|worse than none|where useful/,
+      `${file}: names extracted-from-task with no link-quality filter`,
+    );
+  }
+});

@@ -8,3 +8,7 @@ node_modules/
 *~
 .idea/
 .vscode/
+
+# plugin eval runs (claude plugin eval) — generated per run, never committed
+evals/results/
+evals/mocks/.replay/

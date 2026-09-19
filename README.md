@@ -194,6 +194,23 @@ The production service runs on Google Cloud with primary infrastructure in `asia
 
 For implementation-level details, see [SECURITY.md](SECURITY.md).
 
+## Evaluating the Plugin
+
+The tests under [`scripts/lib/`](scripts/lib/) check that the wording is present. They cannot tell you whether an agent that reads it behaves any differently. [`evals/`](evals/) answers that: it runs a real agent against a mocked Melxis server and scores what it does, once with the plugin and once without, so the number that matters is the difference between the two.
+
+```bash
+claude plugin eval . --runs 3 --ablation with-without --judge-model sonnet --no-publish
+node evals/gate.mjs
+```
+
+Each case is a prompt plus graders; [`evals/mocks/melxis/`](evals/mocks/melxis/) stands in for the server, so no account and no real data are involved. A single run is noisy, which is why `--runs 3` is the floor.
+
+`gate.mjs` reads the newest run and decides on the deterministic graders alone — tool calls, ordering, pattern matches, file checks, plus whether a run errored or tripped a mock guard. Each check is judged across the runs of its case: failing in most of them fails the release, failing in a minority is reported as flaky and does not. The LLM rubrics are there to be read in the HTML report, not to pass or fail a release: they are judged by a model and vary between runs. The corollary is that a green gate can sit alongside a red rubric, so open the report rather than reading the exit code alone.
+
+All cases share one fake world, in [`evals/mocks/melxis/_server.md`](evals/mocks/melxis/_server.md), and the rubrics are written against it. Editing a fact there can leave a rubric elsewhere asserting something the world no longer says, which surfaces as that case failing for a reason unrelated to the plugin — so after touching the world, run the whole suite rather than the case you were working on.
+
+Two limits worth knowing. Mocks stand in for tools but not for the server's `instructions`, so this suite exercises hooks and tool descriptions only — the path a hook-less client depends on is not covered here. And the cases cover a fraction of what the plugin steers; a green gate means nothing checked broke, not that the plugin is correct.
+
 ## Troubleshooting
 
 | Symptom | Fix |
