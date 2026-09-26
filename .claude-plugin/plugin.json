@@ -1,14 +1,16 @@
 {
   "name": "melxis",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "One mind. Many AIs. — shared memory and tasks for AI agents",
   "author": {
     "name": "Melxis",
     "url": "https://melxis.com"
   },
   "homepage": "https://melxis.com",
+  "privacyPolicyUrl": "https://melxis.com/legal/privacy",
   "repository": "https://github.com/melxis-com/toolkit",
   "license": "Apache-2.0",
+  "icon": "./assets/melxis-icon.svg",
   "keywords": [
     "memory",
     "tasks",
