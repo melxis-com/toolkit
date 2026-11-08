@@ -46,6 +46,15 @@ const VERSIONED = [
   { path: '.agents/plugins/marketplace.json', version: (m) => m.plugins[0].version },
 ];
 
+// .mcp.json is not a manifest, but it carries the version too: it sends it as
+// the X-Melxis-Plugin header so the server can tell which plugin version a
+// request came from. A release that bumps the manifests and forgets this file
+// would report every new install as the old version.
+test('manifests: the MCP config header carries the plugin version', () => {
+  const header = read('.mcp.json').mcpServers.melxis.headers?.['X-Melxis-Plugin'];
+  assert.equal(header, read('.claude-plugin/plugin.json').version, '.mcp.json X-Melxis-Plugin disagrees with the plugin version');
+});
+
 // A hand-written list is exactly what went stale before: the release checklist
 // named two files the repo does not have and omitted .agents/plugins/
 // marketplace.json, which then sat a release behind while every check reported

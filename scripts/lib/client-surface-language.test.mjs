@@ -271,23 +271,28 @@ test('client surface avoids create-first Melxis memory/task wording', () => {
 test('UserPromptSubmit checkpoint recovery prefers existing mel refinement before creation', () => {
   const text = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
 
-  assert.match(text, /search existing mels first/i);
-  assert.match(text, /prefer \\?`mel_patch\\?` \/ \\?`mel_update\\?`/i);
-  assert.match(text, /use \\?`mel_create\\?` only for genuinely new memory/i);
+  assert.match(text, /goes into an existing mel first/i);
+  assert.match(text, /existing mel first \(\\?`mel_patch\\?` \/ \\?`mel_update\\?`\)/i);
+  assert.match(text, /\\?`mel_create\\?` only for genuinely new memory/i);
 });
 
 test('UserPromptSubmit checkpoint recovery preserves evidence status for uncertain signals', () => {
   const text = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
 
-  assert.match(text, /user-reported observations need \\?`user-reported\\?` \+ \\?`needs-verification\\?`/i);
-  assert.match(text, /hypotheses should become verification tasks/i);
+  assert.match(text, /a user report you can check now is checked first/i);
+  assert.match(text, /carries \\?`user-reported\\?` \+ \\?`needs-verification\\?`/i);
+  assert.match(text, /hypotheses become verification tasks/i);
 });
 
 test('UserPromptSubmit reminders prefer existing task before task_create', () => {
   const text = readFileSync(join(ROOT_DIR, 'scripts/on_user_prompt_submit.mjs'), 'utf8');
 
-  assert.match(text, /If an existing task matches this work/i);
-  assert.match(text, /If no existing task matches, call \\?`task_create\\?`/i);
+  // the anchor is read against the hive's recent activity: join only an open
+  // task that is the same work and not a teammate's; never reopen a closed one
+  assert.match(text, /If an open task there \(pending \/ in_progress\) is the same piece of work/i);
+  assert.match(text, /not one assigned to someone else/i);
+  assert.match(text, /completed or cancelled task is a closed record and stays closed/i);
+  assert.match(text, /Otherwise call \\?`task_create\\?`/i);
 });
 
 test('Session bootstrap and prompt recovery form a compact session brief', () => {
@@ -297,13 +302,17 @@ test('Session bootstrap and prompt recovery form a compact session brief', () =>
     assert.match(text, /session brief/i);
     assert.match(text, /hive_context_get/i);
     assert.match(text, /handoff/i);
-    assert.match(text, /sort: "recency"/i);
+    // the hive's recent activity arrives with the guide in the same read; the
+    // separate task_search(sort: "recency") step at session start is gone
+    // (2026-10-07: it was the step agents skipped)
+    assert.match(text, /recent activity/i);
+    assert.doesNotMatch(text, /followed by \\?`task_search/i);
     assert.match(text, /<inferred project name>/i);
     assert.doesNotMatch(text, /<cwd basename>|<repo name>|raw filesystem paths/i);
   }
 
   assert.match(userPrompt, /patch\/update before create/i);
-  assert.match(userPrompt, /user-reported needs verification/i);
+  assert.match(userPrompt, /user reports keep their provenance/i);
   assert.match(userPrompt, /hypotheses become verification tasks/i);
 });
 
@@ -972,7 +981,7 @@ function frontmatter(file) {
   return { description: field('description'), whenToUse: field('when_to_use') };
 }
 
-const SKILLS = ['skills/memory/SKILL.md', 'skills/task/SKILL.md'];
+const SKILLS = ['skills/setup/SKILL.md', 'skills/memory/SKILL.md', 'skills/task/SKILL.md'];
 
 // A plain (unquoted) YAML scalar cannot contain ": " — the parser reads it as
 // a nested mapping and rejects the whole frontmatter (js-yaml, Psych and

@@ -1,6 +1,6 @@
 {
   "name": "melxis",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "One mind. Many AIs. — shared memory and tasks for AI agents",
   "author": {
     "name": "Melxis",
@@ -21,8 +21,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Melxis",
-    "shortDescription": "Coupled memory and tasks for AI agents — Mels and Tasks improve each other",
-    "longDescription": "Melxis couples memory and tasks for AI agents. Save decisions, root causes, and learnings as Mels in hives (namespaces); track multi-step work as Tasks. Memory and Tasks feed each other — Tasks reference related Mels for context, completed Tasks return insights back to Mels, and the next agent picks up where the last one left off. Skills, hooks, and MCP instructions prompt agents to recall before acting, propose saves after deciding, and extract insights at task closure.",
+    "shortDescription": "One mind. Many AIs.",
+    "longDescription": "What you tell one AI becomes context for another AI and your team. Use Melxis to recall decisions and their reasoning, save learnings as Mels, and track work as Tasks. Keep them in hives and share Mels with people and their AI agents across clients. A hive's guide carries the way you want work done. Tasks preserve progress between sessions; insights from completed work can become Mels for the next agent. Connect your Melxis account to get started. Access follows your account permissions: shared hives provide read-only Mels, while Tasks and guides belong to your account. Recall and saving depend on the agent using the skills and MCP tools; the public directory package does not run lifecycle hooks.",
     "developerName": "Melxis",
     "category": "Productivity",
     "capabilities": [
@@ -36,6 +36,9 @@
       "What tasks are pending in this hive?"
     ],
     "websiteURL": "https://melxis.com",
+    "supportURL": "https://melxis.com/en/legal/disclosure",
+    "privacyPolicyURL": "https://melxis.com/en/legal/privacy",
+    "termsOfServiceURL": "https://melxis.com/en/legal/terms",
     "brandColor": "#5B21B6",
     "composerIcon": "./assets/melxis-icon.svg",
     "logo": "./assets/melxis-icon.svg",

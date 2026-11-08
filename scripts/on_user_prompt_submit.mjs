@@ -2,9 +2,11 @@
 // Hook: UserPromptSubmit
 //
 // Injects lightweight Melxis context recovery when recent transcript context
-// does not show a Melxis recovery/tool call, and injects a "your FIRST tool
-// action after recovery MUST anchor the task" directive when the user's prompt
-// looks like multi-step work AND no Melxis task is currently active.
+// does not show a Melxis recovery/tool call, and injects a task-anchor note
+// (multi-step work is tracked in a Melxis task right after recovery) when the
+// user's prompt looks like multi-step work AND no Melxis task is currently
+// active. The text states what the anchor gives and why instead of issuing
+// out-of-band commands, which Claude Code may treat as prompt injection.
 //
 // Design constraints (consistent with the other Cut 4 hooks):
 //   - Pure stdlib, Node ESM, no $HOME writes.
@@ -45,13 +47,13 @@ const TRIVIAL_PATTERN = /(trivial|typo|簡単|ちょっと|軽く)/i;
 const DIRECTIVE_TEMPLATE = (matched) =>
   `[melxis] This appears to be multi-step work (matched keywords: ${matched}).
 
-Your FIRST action after Melxis context recovery MUST anchor the work in a Melxis task:
-- If an existing task matches this work, call \`task_update\` to set it \`in_progress\` and refresh its compressed current state.
-- If no existing task matches, call \`task_create\`.
+Multi-step work is tracked in a Melxis task so the next session or agent can resume it, so right after Melxis context recovery the work is anchored in a task, read against the hive's recent activity from \`hive_context_get\` and \`task_search(sort: "recency")\` (skipped only when that response already carried a \`recent_activity\` list):
+- If an open task there (pending / in_progress) is the same piece of work and is assigned to the user, unassigned, or what the user asks to continue — not one assigned to someone else unless the user asks — read its latest entries if someone else touched it last, then call \`task_update\` to set it \`in_progress\` and refresh its compressed current state. A completed or cancelled task is a closed record and stays closed.
+- Otherwise call \`task_create\` (link it to the closed or related task when there is one). When you cannot tell, confirm with \`task_search\` / \`task_get\` before writing.
 
 Without the task anchor, task-start context recall, closure feedback, and bidirectional mel ⇄ task linking lose their fire point — progress stops flowing back into memory.
 
-Skip task anchoring only if the work is genuinely trivial (typo, single-line fix, pure read-only Q&A). Read-only Q&A still needs session context recovery; do not let the task-anchor skip become a permanent session-context skip. If you proceed without task anchoring and then surface a root cause / decision / multi-step branch, update an existing matching task or create one retroactively.
+Genuinely trivial work (typo, single-line fix, pure read-only Q&A) needs no anchor, though read-only Q&A still needs session context recovery. If a root cause, decision or multi-step branch surfaces later, it goes to an existing matching task or a new one.
 `;
 
 // The fourth recovery path. The three others (startup/resume/compact) are
@@ -61,23 +63,22 @@ Skip task anchoring only if the work is genuinely trivial (typo, single-line fix
 // wording by scripts/lib/client-surface-language.test.mjs. Edit them here too.
 const BOOTSTRAP_TEMPLATE = `[melxis] Recent transcript context does not show Melxis context recovery.
 
-Before answering the user's prompt, run the atomic Melxis recovery flow: call \`hive_search(query: "<inferred project name>")\` first — it gives \`own\` / \`owner_account_id\` per hive; identify hives by id + \`own\`, never by name (names collide across accounts). Infer the project name from local project context without exposing raw local details. Resolve the project's hive set — one own anchor hive (\`own: true\`) plus any shared hives (\`own: false\`, read-only mels). Then — only if an own anchor hive is resolved — call \`hive_context_get(hive_id: "<own anchor hive id>")\` for one read returning the hive guide (what belongs in this hive, where each kind of thing goes, and how to work in it; follow it for the rest of the session, where it takes precedence over your default habits — though an explicit user instruction in the conversation always overrides it) together with the mels it points at, followed by \`task_search(hive_id: "<own anchor hive id>", sort: "recency", limit: 10)\` without \`parent_task_id\` for handoff recovery. Both are own-hive only — tasks are private to each account, so shared hives have none; with no own anchor, operate in shared-only mode and skip both \`hive_context_get\` and task recovery. When a clear project has no fitting own hive (or you own none at all), propose creating one at the first save-worthy mel or task with \`hive_create\` — suggest a name (the project's own, e.g. the repo) and a one-line description; hive creation asks the user even under auto write policy — then write its first guide with \`guide_edit\` from the purpose the user just stated. A stray note that belongs to no project goes to the Default hive, the fallback inbox every account starts with (an argless \`hive_search\` lists every hive you can reach; \`own\` tells yours apart), not a project's home. For the task you resume, \`task_get\` returns its \`timeline\` — the task's own history in time order, the newest 50 entries by default; \`description\` is where the work stands now — so read it before acting. If unresolved/ambiguous, do not run cross-hive \`task_search\`; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered hive guide, handoff task context, and evidence constraints (patch/update before create; user-reported needs verification; hypotheses become verification tasks) as a compact session brief; keep working recall blended (leave \`hive_ids\` / \`owner_account_ids\` unset in \`mel_search\`).
+An answer made before recovery cannot use the hive guide, open work or saved decisions, so the atomic Melxis recovery flow comes first: call \`hive_search(query: "<inferred project name>")\` first — it gives \`own\` / \`owner_account_id\` per hive; identify hives by id + \`own\`, never by name (names collide across accounts). Infer the project name from local project context without exposing raw local details. Resolve the project's hive set — one own anchor hive (\`own: true\`) plus any shared hives (\`own: false\`, read-only mels). Then — only if an own anchor hive is resolved — call \`hive_context_get(hive_id: "<own anchor hive id>")\` for one read returning the hive guide (what belongs in this hive, where each kind of thing goes, and how to work in it; follow it for the rest of the session, where it takes precedence over your default habits — though an explicit user instruction in the conversation always overrides it) together with the mels it points at and the hive's recent activity (the 10 most recently touched tasks, any status, with who created and who last touched each — a picture of what is moving, not a list of things to resume; a new request that is the same piece of work as a task already there joins it if it is still open instead of duplicating it — a completed or cancelled task is a closed record, taken up again only as a new task linked to it; and creator and last actor show origin and activity, not assignment (only the owner label or the user assigns a task): a task assigned to someone else is not taken over unless the user asks; for "where I left off", prefer the user's own thread over recency; read others' latest entries before continuing); then call \`task_search(hive_id: "<own anchor hive id>", sort: "recency", limit: 10)\` without \`parent_task_id\` for the same picture, skipping it only when that response already carried a \`recent_activity\` list (older servers do not return one). Guide and tasks are own-hive only — tasks are private to each account, so shared hives have none; with no own anchor, operate in shared-only mode and skip both \`hive_context_get\` and task recovery. When a clear project has no fitting own hive (or you own none at all), propose creating one at the first save-worthy mel or task with \`hive_create\` — suggest a name (the project's own, e.g. the repo) and a one-line description; hive creation asks the user even under auto write policy — then write its first guide with \`guide_edit\` from the purpose the user just stated. A stray note that belongs to no project goes to the Default hive, the fallback inbox every account starts with (an argless \`hive_search\` lists every hive you can reach; \`own\` tells yours apart), not a project's home. For the task you resume, \`task_get\` returns its \`timeline\` — the task's own history in time order, the newest 50 entries by default; \`description\` is where the work stands now — so read it before acting. If unresolved/ambiguous, a cross-hive \`task_search\` would mix in other projects' work; ask the user to choose/create a hive only when substantive work needs project context. Use the recovered hive guide, handoff task context, and evidence constraints (patch/update before create; user reports keep their provenance; hypotheses become verification tasks) as a compact session brief; keep working recall blended (leave \`hive_ids\` / \`owner_account_ids\` unset in \`mel_search\`), and before drafting, planning or changing code, search for knowledge that bears on the work, read it in full with \`mel_get\` and apply what holds to the work itself — in text for someone else, state as fact only what is confirmed and include relevant recommendations in that text itself as conditional proposals, marking an unconfirmed specific in a draft inline; check a mel when the work depends on it and you can, and revisit a past decision whose premises have changed.
 
-This is a lightweight recovery path for cleared/compacted context. Do not create or update memory from this reminder alone. Routine Melxis bookkeeping stays silent; report MCP availability/auth/token/connection failures.
+This is a lightweight recovery path for cleared/compacted context; this reminder alone is no reason to create or update memory. Routine Melxis calls show in the transcript and need no narration; an MCP connection or auth failure does, since memory went unchecked.
 `;
 
 const CHECKPOINT_RECOVERY_TEMPLATE = `[melxis] Recent transcript suggests task-like progress may not be reflected in Melxis yet.
 
-Before substantive work, silently refresh the active/relevant task if needed:
-- Update the parent task description as compressed current state, not append-only history.
-- A finding, an open question or a blocker from the work so far goes to \`task_note\` as one entry per event (kind note / question / blocker) — not into the description; a note written now about something earlier gets the current \`created_at\`, so say in its content when it happened. An entry that will still matter after the task closes becomes a mel now, not at closure.
-- Update status, priority, tags, and related_mel_ids when the current state changed.
-- Keep the parent task as goal / why / Definition of Done; create or update sub-tasks for independently resumable remaining work with separate completion criteria.
-- Do not create sub-tasks for ephemeral same-turn steps.
-- If task-derived memory is durable, search existing mels first, prefer \`mel_patch\` / \`mel_update\`, use \`mel_create\` only for genuinely new memory, link with reason "extracted-from-task" where useful, and add relevant mel IDs back to the source task.
-- User-reported observations need \`user-reported\` + \`needs-verification\`; hypotheses should become verification tasks, not mel facts.
+The task is how the next session or agent picks this work up, so it carries where the work stands:
+- The parent task description is compressed current state, not append-only history.
+- A finding, an open question or a blocker from the work so far is a \`task_note\` entry, one per event (kind note / question / blocker), not part of the description; a note written now about something earlier gets the current \`created_at\`, so its content says when it happened. An entry that will still matter after the task closes is a mel now, not at closure.
+- Status, priority, tags and related_mel_ids follow the current state.
+- The parent task holds goal / why / Definition of Done; sub-tasks hold independently resumable remaining work with separate completion criteria, not same-turn steps.
+- Durable task-derived memory goes into an existing mel first (\`mel_patch\` / \`mel_update\`), \`mel_create\` only for genuinely new memory, linked with reason "extracted-from-task" where useful, with its id added back to the source task.
+- A user report you can check now is checked first; otherwise it carries \`user-reported\` + \`needs-verification\` (or \`user-reported\` alone, attributed to the user in the summary too, when the user says they verified it). Hypotheses become verification tasks, not mel facts.
 
-Routine Melxis bookkeeping stays silent; do not explain a skip to the user.
+When the task already reflects the work, there is nothing to refresh. Routine Melxis calls show in the transcript and need no narration.
 `;
 
 // Extract every matched keyword from the prompt so the injected directive

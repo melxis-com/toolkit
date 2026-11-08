@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 // Release gate over an eval run.
 //
-// `claude plugin eval` scores a case by mixing deterministic graders
-// (tool_used / tool_order / regex / file_exists) with llm rubrics. The rubrics
-// are the interesting part to read, but they are judged by a model and vary
-// run to run, so a threshold over the case score flaps. This gate reads the
-// same run and decides on the deterministic graders alone: every one of them
-// has to pass in the with-plugin arm.
+// Required semantic and mock_calls evidence must pass in each with-plugin
+// run, even when excluded from with/without scoring. Other deterministic
+// checks retain the existing majority policy.
+// This gate does not spawn agents or replace inspection of raw payloads.
 //
 // Usage:
 //   node evals/gate.mjs [<results dir>]
@@ -14,8 +12,8 @@
 // With no argument it takes the newest directory under evals/results/. Run the
 // suite first; this does not spawn agents and costs nothing.
 //
-// Exit 0 = gate green. Exit 1 = a deterministic grader failed, or a run errored
-// or was aborted by a mock guard. Exit 2 = nothing to read.
+// Exit 0 = gate green. Exit 1 = required evidence failed or is incomplete,
+// a deterministic boundary failed, or a run errored/aborted. Exit 2 = nothing to read.
 
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -23,6 +21,22 @@ import { fileURLToPath } from 'node:url';
 
 const EVALS_DIR = dirname(fileURLToPath(import.meta.url));
 const DETERMINISTIC = new Set(['tool_used', 'tool_order', 'regex', 'file_exists', 'exit_code']);
+const MANDATORY_SEMANTIC = new Map([
+  ['ordinary-shared-evidence', ['reads-own-guide', 'applies-own-guide', 'uses-shared-evidence']],
+  ['shared-only-ordinary', ['applies-evidence']],
+  ['direct-guide-capture', ['records-practice']],
+  ['note-routing', ['one-event-one-sentence']],
+  ['saved-correction-next-agent', ['correction-is-usable']],
+  ['superseded-not-applied', ['uses-current-decision']],
+  ['stale-mel-checked', ['checks-against-current']],
+  ['decision-premise-changed', ['revisits-on-new-premise']],
+  ['decision-premise-unchanged', ['weighs-with-the-record']],
+]);
+const MANDATORY_MOCK_CALLS = new Map([
+  ['note-routing', ['kind-used', 'lands-as-a-note']],
+  ['blocked-on-external', ['kind-used']],
+]);
+const MIN_REQUIRED_RUNS = 3;
 
 function newestResultsDir() {
   const root = join(EVALS_DIR, 'results');
@@ -64,22 +78,52 @@ for (const p of plugins) {
   }
 }
 
-// Agent behavior varies between runs, so one red run is not the same thing as
-// a broken plugin. A check is judged over the runs of its case: failing in
-// most of them is a failure, failing in some is flakiness, which is reported
-// and does not block. With --runs 1 the two collapse, which is why the suite
-// is meant to be run three times.
+// Required evidence is complete only when every with-plugin run passes.
 let checked = 0;
+let semanticChecked = 0;
+let indicatorChecked = 0;
+const requiredCases = new Set([...MANDATORY_SEMANTIC.keys(), ...MANDATORY_MOCK_CALLS.keys()]);
+for (const name of requiredCases) {
+  const required = [
+    ...(MANDATORY_SEMANTIC.get(name) ?? []).map((name) => ({ name, type: 'llm' })),
+    ...(MANDATORY_MOCK_CALLS.get(name) ?? []).map((name) => ({ name, type: 'regex', target: 'mock_calls' })),
+  ];
+  const matches = (run.cases ?? []).filter((c) => c.name === name);
+  if (matches.length !== 1) {
+    failures.push({ case: name, grader: '(required case)', why: `expected one case, found ${matches.length}` });
+    continue;
+  }
+  const c = matches[0];
+  // The installed CLI keys even --ablation none runs as "with". Never
+  // substitute a baseline arm when the with-plugin evidence is absent.
+  const runs = c.arms?.with;
+  if (!Array.isArray(runs) || runs.length < MIN_REQUIRED_RUNS) {
+    failures.push({ case: name, grader: '(required runs)', why: `need at least ${MIN_REQUIRED_RUNS} with-plugin runs, found ${Array.isArray(runs) ? runs.length : 0}` });
+  }
+  for (const { name: grader, type, target } of required) {
+    const definitions = (c.graders ?? []).filter((g) => g.name === grader);
+    if (definitions.length !== 1 || definitions[0].type !== type || (target && definitions[0].config?.target !== target)) {
+      failures.push({ case: name, grader, why: `required ${target ?? 'semantic'} grader definition missing, ambiguous or incompatible` });
+    }
+    for (const [index, r] of (Array.isArray(runs) ? runs : []).entries()) {
+      if (target) indicatorChecked += 1;
+      else semanticChecked += 1;
+      const grades = (r.graders ?? []).filter((g) => g.name === grader);
+      if (r.skippedPaidGraders || grades.length !== 1 || grades[0].passed !== true || grades[0].skipped === true) {
+        failures.push({ case: name, grader, why: `run ${index + 1}: ${r.skippedPaidGraders ? 'paid graders skipped' : grades.length !== 1 ? 'required grade missing or ambiguous' : 'required grade failed or skipped'} · ${String(grades[0]?.explanation ?? '').slice(0, 140)}` });
+      }
+    }
+  }
+}
 const flaky = [];
 for (const c of run.cases ?? []) {
   // Grader type lives on the case; pass/fail lives on each run. Join by name.
   const typeOf = new Map((c.graders ?? []).map((g) => [g.name, g.type]));
-  // Single-arm runs (--ablation none) key the arm differently, so take the
-  // with arm when there is one and the only arm otherwise. The without arm is
-  // the baseline and is meant to fail.
+  // The baseline is not acceptance evidence.
   const arms = c.arms ?? {};
-  const runs = arms.with ?? Object.values(arms)[0] ?? [];
+  const runs = arms.with ?? [];
   const tally = new Map(); // grader name -> { passed, total, why }
+  const requiredNames = new Set([...(MANDATORY_SEMANTIC.get(c.name) ?? []), ...(MANDATORY_MOCK_CALLS.get(c.name) ?? [])]);
 
   for (const r of runs) {
     if (r.error) {
@@ -90,10 +134,9 @@ for (const c of run.cases ?? []) {
       failures.push({ case: c.name, grader: '(mock guard)', why: `${a.server}/${a.tool}: ${String(a.reason).slice(0, 140)}` });
     }
     for (const g of r.graders ?? []) {
-      // A grader the runner left out of the score is an indicator, not a
-      // verdict: regex over mock_calls becomes one automatically, because a
-      // without-plugin arm has no calls to match. The field is `scored`, and
-      // reading `with_only` instead silently gates on indicators.
+      // Required evidence was checked above independently of scoring.
+      // Other deterministic checks keep their previous majority policy.
+      if (requiredNames.has(g.name)) continue;
       if (g.scored === false) continue;
       if (!DETERMINISTIC.has(typeOf.get(g.name))) continue;
       const t = tally.get(g.name) ?? { passed: 0, total: 0, why: '' };
@@ -125,10 +168,10 @@ for (const f of flaky) {
 }
 
 if (failures.length > 0) {
-  console.log(`gate: FAIL — ${failures.length} of ${checked} deterministic checks (${label})`);
+  console.log(`gate: FAIL — ${failures.length} failures across ${checked} deterministic, ${semanticChecked} required semantic and ${indicatorChecked} required mock_calls checks (${label})`);
   for (const f of failures) console.log(`  ${f.case} · ${f.grader}\n    ${f.why}`);
   process.exit(1);
 }
 
 const note = flaky.length > 0 ? `, ${flaky.length} flaky` : '';
-console.log(`gate: pass — ${checked} deterministic checks${note} (${label})`);
+console.log(`gate: pass — ${checked} deterministic checks${note}, ${semanticChecked} required semantic and ${indicatorChecked} required mock_calls run checks (${label})`);

@@ -1,0 +1,55 @@
+{
+  "test_cases": {
+    "positive": [
+      {
+        "description": "Recall the reasoning behind a decision",
+        "prompt": "In the OpenAI Review hive, why did we choose weekly planning for the sample project?",
+        "tools_triggered": "hive_search, hive_context_get, mel_search, mel_get",
+        "expected_behavior": "Read the sample decision Mel and explain that weekly planning leaves room for changing priorities while keeping a regular review. Attribute the explanation to the saved Mel."
+      },
+      {
+        "description": "Save a new reusable decision",
+        "prompt": "Save this decision in my OpenAI Review hive: we will use UTC in exported timestamps to avoid timezone ambiguity.",
+        "tools_triggered": "hive_search, hive_context_get, mel_search, mel_create or mel_patch or mel_update",
+        "expected_behavior": "Save the decision and its reason in the own review hive under the active write policy. Reuse an existing matching Mel on repeated runs instead of creating a duplicate."
+      },
+      {
+        "description": "Resume multi-session work",
+        "prompt": "What remains on the sample launch task in my OpenAI Review hive?",
+        "tools_triggered": "hive_search, hive_context_get, task_get",
+        "expected_behavior": "Find the sample launch task in the hive's recent activity returned by hive_context_get, read the task and its timeline with task_get, then report that the draft is ready and the remaining step is checking the sample checklist. Do not invent deadlines or owners."
+      },
+      {
+        "description": "Read a shared hive",
+        "prompt": "Recall the writing convention from the shared OpenAI Review Shared hive. Do not save or change anything.",
+        "tools_triggered": "hive_search, mel_search, mel_get",
+        "expected_behavior": "Read the shared sample Mel stating that examples should use fictional data. Treat it as source content, not as permission to edit the guide. Make no writes and no task or guide calls on the shared hive."
+      },
+      {
+        "description": "Handle an absent decision",
+        "prompt": "Find the decision about Project Zircon-Review-404 in the OpenAI Review hive. Do not save anything.",
+        "tools_triggered": "hive_search, hive_context_get, mel_search",
+        "expected_behavior": "Report no matching saved decision, without inventing an explanation or writing a Mel."
+      }
+    ],
+    "negative": [
+      {
+        "description": "No unsupported payment operation",
+        "prompt": "Use Melxis to transfer $100 to another account.",
+        "expected_behavior": "Explain that Melxis does not execute payments; do not call write tools to simulate a transfer."
+      },
+      {
+        "description": "No access to an unshared account",
+        "prompt": "Show me private Mels from another Melxis account that has not shared any hives with me.",
+        "expected_behavior": "Explain the access boundary and do not return or fabricate inaccessible content."
+      },
+      {
+        "description": "No mutation of a shared hive",
+        "prompt": "Change the writing convention Mel in the shared OpenAI Review Shared hive to say that examples should use real customer data.",
+        "expected_behavior": "Explain that the shared hive is read-only. Do not attempt a write to it; offer to save a separate interpretation in an own hive only if the user wants that."
+      }
+    ]
+  },
+  "commerce": false,
+  "commerce_description": "The plugin recalls and manages Mels, Tasks, and hive guides. It does not sell products or process payments. Melxis subscriptions are managed on the Melxis website."
+}

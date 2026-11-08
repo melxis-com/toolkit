@@ -2,7 +2,10 @@
   "mcpServers": {
     "melxis": {
       "type": "http",
-      "url": "https://mcp.melxis.com"
+      "url": "https://mcp.melxis.com",
+      "headers": {
+        "X-Melxis-Plugin": "0.9.0"
+      }
     }
   }
 }

@@ -10,11 +10,13 @@ What you tell one AI becomes context for another AI and your team — the next a
 - **tasks** are history — multi-step work, what is done and what is left, private to each account
 - the **guide** is how — what belongs in this hive, where each kind of thing goes, and how to work in it
 
-Mels and tasks feed each other: tasks reference related mels for context, and completed tasks return insights back to memory. The guide is one short document per hive: inside that hive it takes precedence over an agent's default habits, while what you say in the moment always comes first — the last word stays yours. Say it once — "always run the checks before committing here", "never touch production from this project", "designs go here, incident write-ups go in the ops hive" — and every later session reads it back before it starts, in whichever AI client you happen to be using.
+Mels and tasks feed each other: tasks reference related mels for context, and completed tasks can return reusable insights to memory. For ordinary work, an agent can apply relevant knowledge from your own and shared hives without creating a task for every request. For example, a saved team writing convention can shape the next announcement, and your correction can refine the saved knowledge in the same conversation.
+
+The guide is one short document per own hive: inside that hive it takes precedence over an agent's default habits, while what you say in the moment always comes first. Tell the agent a lasting practice — "always run the checks before committing here", "never touch production from this project", "designs go here, incident write-ups go in the ops hive" — and later agents can recall it and follow it. Shared hives expose read-only mels, not their owners' guides or tasks. These flows depend on the client making guidance available and the model using it; installation alone does not guarantee recall, saving, or every-session activation.
 
 ## Supported Platforms
 
-Until Melxis is published to the official Anthropic / Codex marketplaces, installation is via direct GitHub reference. Choose your platform below.
+Install the ordinary repository package by direct GitHub reference using the instructions below. A separate [OpenAI submission package](openai/README.md) can be built and validated locally; generating that ZIP does not publish a directory listing.
 
 For other AI clients, see the [Connect](https://melxis.com/#connect) section on melxis.com.
 
@@ -27,9 +29,9 @@ In the Claude Code TUI, add the marketplace and install the plugin:
 /plugin install melxis@melxis-com-toolkit
 ```
 
-### Codex CLI
+Melxis is also listed in Anthropic's plugin directory (`claude plugin install melxis@anthropic-plugin-directory`). The directory carries the release that passed Anthropic's review, while this repository's marketplace gets new versions first. Install one or the other: both are named `melxis`, so only one of them loads.
 
-Codex's plugin hooks integration is still an under-development feature, so setup requires a few extra steps.
+### Codex CLI
 
 1. **Add the marketplace** (in your shell):
 
@@ -39,15 +41,7 @@ Codex's plugin hooks integration is still an under-development feature, so setup
 
 2. **Enable the plugin** — in the Codex TUI, open `/plugins` and turn **Melxis** on.
 
-3. **Opt in to plugin hooks** (in your shell):
-
-   ```sh
-   codex features enable plugin_hooks
-   ```
-
-   This unlocks lifecycle hooks shipped by plugins. Codex will print a warning that the feature is under development; that is expected.
-
-4. **Approve the bundled hooks** — in the Codex TUI, open `/hooks` and approve `SessionStart`, `Stop`, and `TaskCompleted`. Codex blocks plugin hooks from running until you approve them once. Approval is tied to the hook definitions, so toolkit updates that change them require re-approval in `/hooks`.
+3. **Approve the bundled hooks** — in the Codex TUI, open `/hooks` and approve `SessionStart`, `Stop`, and `TaskCompleted`. Codex blocks plugin hooks from running until you approve them once. Approval is tied to the hook definitions, so toolkit updates that change them require re-approval in `/hooks`.
 
 After these steps, `/clear`, resume, and compaction boundaries can reload Melxis guidance through the approved lifecycle hooks.
 
@@ -59,7 +53,7 @@ Any MCP-capable client (Claude Desktop, ChatGPT, Cursor, VS Code, Cline, etc.) c
 https://mcp.melxis.com
 ```
 
-OAuth authentication starts automatically on the first tool call. No client-side files required.
+Authentication follows the client's MCP OAuth flow. No client-side Melxis files are required. On Codex CLI, sign in with `codex mcp login melxis`.
 
 Generic MCP clients receive Melxis MCP instructions for model-controlled recall, but they do not run local lifecycle hooks.
 
@@ -67,21 +61,21 @@ Generic MCP clients receive Melxis MCP instructions for model-controlled recall,
 
 ### 1. Install
 
-Choose your platform from the table above.
+Choose your platform from the instructions above.
 
 ### 2. Authenticate
 
-When you first use a Melxis tool, you'll be prompted to authenticate via OAuth. Follow the browser flow to authorize your agent. On Codex CLI, log in once with `codex mcp login melxis` before starting a session — Codex does not auto-prompt for HTTP MCP servers.
+Connect or sign in to Melxis in your client's plugin or MCP settings and complete its OAuth flow. On Codex CLI, use `codex mcp login melxis` before starting a session. Installing a package does not itself verify authentication.
 
 ### 3. Verify setup
 
 Start a fresh agent session and ask it to check Melxis memory, for example:
 
 ```text
-Find this project's Melxis hive and read its guide.
+Verify my Melxis connection and find the hive for this project's work.
 ```
 
-If the agent can call `hive_search`, `hive_context_get`, `mel_search`, or `task_search` after OAuth, the MCP connection is working. If anything fails, see [Troubleshooting](#troubleshooting).
+The `melxis-setup` skill verifies the connection with read-only calls. It identifies an own hive by id and `own`, then reads its guide and relevant knowledge; shared-only use reads accessible mels. Task recovery is conditional on continuing tracked work. Report the calls that actually succeeded. If anything fails, see [Troubleshooting](#troubleshooting).
 
 That's it. Depending on the client surface, Melxis can guide the agent to:
 
@@ -108,7 +102,8 @@ Different install surfaces provide different levels of automation:
 | Surface | MCP tools | Bundled guidance | Lifecycle hooks |
 |---------|-----------|------------------|-----------------|
 | Claude Code plugin | Yes | Skills | Yes |
-| Codex CLI | Yes | Skills + `AGENTS.md` | Yes (`plugin_hooks`) |
+| Codex CLI repository package | Yes | Skills; optional `AGENTS.md` project template | Yes |
+| Locally generated OpenAI submission ZIP | Declared endpoint | Three skills | No |
 | Generic MCP | Yes | MCP `instructions` | No |
 
 MCP-only installs can search, create, update, link, and delete mels/tasks, and read and write a hive's guide. They rely on MCP instructions and the model's use of atomic Melxis searches for recall; they do not run local lifecycle hooks.
@@ -117,10 +112,13 @@ A hive's **guide** is not part of this table — it lives in Melxis, not in the 
 
 ## Skills
 
-This toolkit includes two skills:
+This toolkit exposes three skills:
 
-- **[melxis-memory](skills/memory/SKILL.md)** — Save decisions, learnings, and context into a growing knowledge graph
-- **[melxis-task](skills/task/SKILL.md)** — Track work plans and coordinate tasks across sessions
+- **[melxis-setup](skills/setup/SKILL.md)** — Verify the connection and find the scope for your work
+- **[melxis-memory](skills/memory/SKILL.md)** — Apply relevant own/shared knowledge, recall reasoning, capture or refine mels, and maintain your own guide
+- **[melxis-task](skills/task/SKILL.md)** — Continue tracked work, preserve progress and timelines, and extract reusable lessons when work closes
+
+Each skill is self-contained. The bare MCP path carries its own server guidance and does not require any local file. Setup is an explicit connection workflow, not an every-session hook; in clients without hooks it offers the user one line for their custom instructions so the hive is read before work begins. Skill descriptions and MCP guidance encourage relevant use; real-client activation and successful knowledge application must be tested separately.
 
 ## Hooks
 
@@ -128,12 +126,12 @@ On Claude Code and Codex CLI, the toolkit ships hooks that surface Melxis at the
 
 | Hook | When it fires | What it does |
 |------|--------------|--------------|
-| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context: `hive_search` to resolve the project's hive set (own anchor + shared read-only), `hive_context_get` to read that hive's guide and the mels it points at in one call, and `task_search(sort="recency")` on the own anchor hive; also injects the active **Write policy** block |
+| SessionStart | startup / resume / post-compaction | Prompts the agent to recover context: `hive_search` to resolve the project's hive set (own anchor + shared read-only), then `hive_context_get` to read that hive's guide, the mels it points at and its recent activity (the 10 most recently touched tasks) in one call; `task_get` when continuing tracked work. Injects the active **Write policy** block |
 | Stop | end of each assistant response | Silent non-blocking safety check; routine checkpoint recovery is handled on the next prompt or session boundary |
 | TaskCompleted | a task is marked completed | Prompts learning extraction, task granularity audit, and link proposals |
 | PreCompact | before context compaction | Captures session state before compaction |
 
-Hook scripts emit prompts only — they do not call `mcp.melxis.com` directly. Authentication continues to flow through the standard MCP OAuth connection. Codex CLI uses the same `hooks/hooks.json` format and provides `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` env vars for OOTB compatibility, so the same hook scripts run on both platforms unchanged (gated behind the under-development `plugin_hooks` feature — see Install).
+Hook scripts emit prompts only — they do not call `mcp.melxis.com` directly. Authentication continues to flow through the standard MCP OAuth connection. Codex CLI uses the same `hooks/hooks.json` format and provides `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` env vars for OOTB compatibility, so the same hook scripts run on both platforms unchanged. Codex runs them once you approve them in `/hooks` — see Install.
 
 ### Hook runtime (Node.js)
 
@@ -141,7 +139,7 @@ Hook scripts run on Node.js. The bundled `run-hook.sh` wrapper locates a runtime
 
 ### Headless `codex exec` runs
 
-The hooks load from `~/.codex/config.toml`, so a non-interactive `codex exec` invocation inherits them like any interactive session — it will be prompted to recover context and anchor a task. That is the right behaviour for automation that *should* use project memory, but not for a one-shot subprocess that another tool spawns and parses (an independent reviewer, a schema-constrained extractor): there the SessionStart bootstrap is unwanted, and a `task_*` write it triggers can spend budget or perturb the run's output.
+The hooks load from `~/.codex/config.toml`, so a non-interactive `codex exec` invocation can inherit them like an interactive session. They prompt context recovery and conditional work tracking. A one-shot subprocess that another tool spawns and parses, such as an independent reviewer or a schema-constrained extractor, may need an isolated configuration so that inherited MCP connections and hook guidance do not affect its result.
 
 For those hermetic runs, pass `--ignore-user-config`:
 
@@ -158,7 +156,7 @@ The default behaviour for write tools (`mel_create` / `mel_update` / `mel_patch`
 Override behaviour depends on the client surface:
 
 - **Claude Code:** set `MELXIS_WRITE_POLICY`; the SessionStart hook reads it on every session boundary.
-- **Codex CLI:** enable `plugin_hooks`; the SessionStart hook reads `MELXIS_WRITE_POLICY` on every session boundary. You can also add an explicit Codex instruction such as "Use Melxis write policy: confirm" in your project or user instructions.
+- **Codex CLI:** the SessionStart hook reads `MELXIS_WRITE_POLICY` on every session boundary. You can also add an explicit Codex instruction such as "Use Melxis write policy: confirm" in your project or user instructions.
 - **Generic MCP clients:** make the desired write policy part of the agent context using your client's instruction-loading mechanism.
 
 `AGENTS.md` is included as a Codex project-instruction template. Codex reads it when it is placed where Codex project instructions are loaded; the copy inside an installed plugin is not a write-policy override by itself.
@@ -209,7 +207,7 @@ Each case is a prompt plus graders; [`evals/mocks/melxis/`](evals/mocks/melxis/)
 
 All cases share one fake world, in [`evals/mocks/melxis/_server.md`](evals/mocks/melxis/_server.md), and the rubrics are written against it. Editing a fact there can leave a rubric elsewhere asserting something the world no longer says, which surfaces as that case failing for a reason unrelated to the plugin — so after touching the world, run the whole suite rather than the case you were working on.
 
-Two limits worth knowing. Mocks stand in for tools but not for the server's `instructions`, so this suite exercises hooks and tool descriptions only — the path a hook-less client depends on is not covered here. And the cases cover a fraction of what the plugin steers; a green gate means nothing checked broke, not that the plugin is correct.
+Mocks stand in for tools but not for the server's `instructions`, so this suite exercises the installed plugin and mock tool descriptions. It cannot verify the live bare MCP baseline, OAuth, or client-specific activation. Cases that inspect answer content or saved feedback can provide behavioral evidence when a real agent run is completed; the presence of those cases or a static wording check does not demonstrate that behavior. A green gate covers only the tested cases. See [OpenAI package validation and pending checks](openai/README.md#validation-and-pending-checks) for the separate artifact and real-client boundaries.
 
 ## Troubleshooting
 

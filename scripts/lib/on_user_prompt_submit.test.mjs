@@ -302,13 +302,15 @@ test('buildAdditionalContext: bootstrap only for non-work prompt', () => {
   // changes depending on which one fired.
   assert.match(context, /hive_search\(query: "<inferred project name>"\).{0,4}first/);
   assert.match(context, /hive_context_get\(hive_id: "<own anchor hive id>"\)/);
-  assert.match(context, /sort: "recency", limit: 10/);
+  // recent activity arrives with the guide in the same read; no separate
+  // task_search step at session start (that step was the one agents skipped)
+  assert.match(context, /recent activity/);
+  assert.doesNotMatch(context, /followed by `task_search/);
   assert.match(context, /identify hives by id \+ `own`, never by name/);
-  // The gate has to cover hive_context_get and task_search together. Gating only
+  // The gate has to cover hive_context_get and task recovery together. Gating only
   // one of them leaves a path where a user with no own anchor is told to make an
   // own-hive-only read.
   assert.match(context, /only if an own anchor hive is resolved — call `hive_context_get/);
-  assert.match(context, /followed by `task_search/);
   assert.match(context, /shared-only mode and skip both `hive_context_get` and task recovery/);
   assert.match(context, /Tasks are private to each account/i);
   assert.doesNotMatch(context, /<cwd basename>|<repo name>|raw filesystem paths/i);
@@ -323,15 +325,15 @@ test('buildAdditionalContext: combines bootstrap and task directive for multi-st
   assert.match(context, /Recent transcript context does not show Melxis context recovery/);
   assert.match(context, /hive_search\(query: "<inferred project name>"\).{0,4}first/);
   assert.match(context, /hive_context_get\(hive_id: "<own anchor hive id>"\)/);
-  assert.match(context, /sort: "recency", limit: 10/);
-  // The gate has to cover hive_context_get and task_search together. Gating only
+  assert.match(context, /recent activity/);
+  // The gate has to cover hive_context_get and task recovery together. Gating only
   // one of them leaves a path where a user with no own anchor is told to make an
   // own-hive-only read.
   assert.match(context, /only if an own anchor hive is resolved — call `hive_context_get/);
-  assert.match(context, /followed by `task_search/);
+  assert.doesNotMatch(context, /followed by `task_search/);
   assert.match(context, /task_update/);
   assert.match(context, /task_create/);
-  assert.match(context, /Read-only Q&A still needs session context recovery/);
+  assert.match(context, /read-only Q&A still needs session context recovery/);
 });
 
 test('buildAdditionalContext: includes checkpoint recovery before next turn', () => {
@@ -641,10 +643,10 @@ test('bootstrap: SessionStart and UserPromptSubmit prescribe the same recall ste
   const userPrompt = readFileSync(join(here, '..', 'on_user_prompt_submit.mjs'), 'utf8');
 
   const REQUIRED = [
-    // the guide and the mels it points at come back in one call, from a given hive id
+    // the guide, the mels it points at and the recent activity come back in one
+    // call, from a given hive id — there is no separate task_search step
     'hive_context_get(hive_id: "<own anchor hive id',
-    // handoff recovery is capped
-    'sort: "recency", limit: 10',
+    'recent activity',
     // with no own anchor, neither the guide nor tasks are fetched — gating only
     // one of them is what went wrong before
     'skip both `hive_context_get` and task recovery',

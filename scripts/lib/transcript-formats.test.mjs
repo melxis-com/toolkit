@@ -43,6 +43,17 @@ const formats = {
       { type: 'tool_use', name: `mcp__melxis__${tool}`, input },
     ] } }),
   },
+  // Current Claude Code wraps each hook record in an attachment entry.
+  'claude-attachment': {
+    message: (role, text) => ({ message: { role, content: [{ type: 'text', text }] } }),
+    hook: text => ({
+      type: 'attachment',
+      attachment: { type: 'hook_additional_context', hookName: 'UserPromptSubmit', content: [text] },
+    }),
+    call: (tool, input = {}) => ({ message: { role: 'assistant', content: [
+      { type: 'tool_use', name: `mcp__melxis__${tool}`, input },
+    ] } }),
+  },
   codex: {
     message: codexMessage,
     hook: text => codexMessage('developer', text, { content_item_kinds: ['hooks.additional_context'] }),

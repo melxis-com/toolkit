@@ -1,0 +1,44 @@
+{
+  "_doc": "Which user / Melxis value each case measures. compare.mjs reports targets per dimension, so a version that wins one value and loses another shows both.",
+  "shared-knowledge-applied": [
+    "ordinary-shared-evidence",
+    "shared-only-ordinary"
+  ],
+  "recall": [
+    "recall-why-decided",
+    "own-hive-then-guide",
+    "superseded-not-applied",
+    "stale-mel-checked",
+    "decision-premise-changed",
+    "decision-premise-unchanged"
+  ],
+  "learning-returns": [
+    "decision-saved-same-turn",
+    "duplicate-insight",
+    "contradiction-supersedes",
+    "saved-correction-next-agent",
+    "direct-guide-capture"
+  ],
+  "work-continuity": [
+    "resume-reads-timeline",
+    "teammate-task-not-mine",
+    "new-request-joins-existing-task",
+    "completed-task-not-reopened",
+    "status-from-recent-activity",
+    "note-routing",
+    "blocked-on-external",
+    "closure-open-question",
+    "stale-blocker-at-closure",
+    "teammate-commented-my-task",
+    "takeover-on-request"
+  ],
+  "low-noise": [
+    "no-melxis-for-plain-questions",
+    "review-request-no-task"
+  ],
+  "safety-and-honesty": [
+    "shared-text-is-data",
+    "user-reported-provenance",
+    "auth-failure-reported"
+  ]
+}

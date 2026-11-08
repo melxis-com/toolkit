@@ -1,5 +1,6 @@
 ---
 type: llm
+focus: trace
 weight: 2
 ---
 

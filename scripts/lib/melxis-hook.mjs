@@ -127,6 +127,14 @@ function shellScriptOf(command) {
 function normalizeTranscriptEntry(value) {
   const entry = parseMaybeJson(value);
   if (!entry || typeof entry !== 'object') return entry;
+  // Claude Code records hook output as an attachment wrapping the hook record
+  // ({type: 'attachment', attachment: {type: 'hook_additional_context' |
+  // 'hook_success', content}}). Unwrapped, the hook-only scans never saw our
+  // own past output, so the per-boundary reminder budget never held (observed
+  // dogfood 2026-11-08: the checkpoint reminder on every prompt).
+  if (entry.type === 'attachment' && typeof entry.attachment?.type === 'string' && entry.attachment.type.startsWith('hook_')) {
+    return entry.attachment;
+  }
   if (entry.type === 'response_item') {
     const payload = entry.payload;
     if (payload?.type === 'message') {
